@@ -7,7 +7,7 @@
     "enabled": true
   },
   "vars": {
-    "BOT_OWNER_ID": "REPLACE_WITH_YOUR_TELEGRAM_USER_ID",
+    "BOT_OWNER_ID": "6453532232",
     "CHANNEL_ID": "@REPLACE_WITH_YOUR_CHANNEL_USERNAME"
   },
   "d1_databases": [
