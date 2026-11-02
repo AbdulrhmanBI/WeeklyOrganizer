@@ -6,6 +6,7 @@ import {
   classifyTelegramMessage,
   buildPublishPlan,
   appendHashtagEntity,
+  normalizeChannelTarget,
 } from "./logic.js";
 import { telegramApi, sendMessage, inlineKeyboard } from "./telegram.js";
 
@@ -115,7 +116,9 @@ function getMessageSource(message) {
 
 async function saveIncomingMessage(env, session, message) {
   const { classification, sourceChatId, sourceMessageId, payloadJson } = getMessageSource(message);
-  if (classification.looksLikeGeneratedLectureAnnouncement || classification.looksLikeGeneratedGroupFooter || classification.looksLikeDividerOnly) {
+  if (classification.looksLikeGeneratedLectureAnnouncement ||
+      classification.looksLikeGeneratedGroupFooter ||
+      classification.looksLikeDividerOnly) {
     return { skippedAnnouncement: true };
   }
 
@@ -172,7 +175,7 @@ async function saveIncomingMessage(env, session, message) {
 async function handleIncomingContent(env, session, message) {
   const saved = await saveIncomingMessage(env, session, message);
   if (saved.skippedAnnouncement) {
-    await reply(env, message.chat.id, "تعرفت على رسالة تعريف أو فاصل قديم. هأنشئ النسخة المناسبة تلقائيًا أثناء النشر، ولن أكرر الرسالة القديمة.");
+    await reply(env, message.chat.id, "استلمت رسالة تعريف أو فاصلًا من المحتوى القديم. هأنشئ الرسائل والفواصل من جديد وفق ترتيب الأسبوع الحالي.");
     return;
   }
   if (saved.duplicateUpdate) return;
@@ -235,6 +238,23 @@ async function handleMessage(env, message) {
   }
   if (text === MAIN_BUTTONS.cancel) {
     await cancelCurrentSession(env, chatId, active);
+    return;
+  }
+
+  if (active?.awaiting_destination) {
+    const destination = normalizeChannelTarget(text);
+    if (!destination) {
+      await reply(env, chatId,
+        "صيغة وجهة النشر غير صحيحة. ابعت @ChannelUsername أو Chat ID رقمي يبدأ عادةً بـ -100 أو رابط t.me لقناة عامة.",
+      );
+      return;
+    }
+    await env.DB.prepare(
+      `UPDATE sessions SET target_chat_id = ?, awaiting_destination = 0, updated_at = ? WHERE id = ?`,
+    ).bind(destination, nowIso(), active.id).run();
+    const updatedSession = { ...active, target_chat_id: destination, awaiting_destination: 0 };
+    await reply(env, chatId, `تم حفظ وجهة النشر: ${destination} ✅\nهجهز المعاينة النهائية الآن.`);
+    await startPublishConfirmation(env, chatId, updatedSession);
     return;
   }
 
@@ -341,11 +361,11 @@ async function showPreview(env, chatId, session) {
     return `${group === "lectures" ? "📚" : group === "sections" ? "📝" : "📌"} ${groupName(group)}: ${result.total}\n${result.lines.join("\n") || "  • لا توجد ملفات"}`;
   });
 
-  let summary = `معاينة محتوى الأسبوع ${session.week_number} ✅\n\n${sections.join("\n\n")}\n\n`;
-  summary += `📦 إجمالي العناصر: ${activeItems.length}\n`;
-  summary += `⚠️ عناصر تحتاج مراجعة: ${reviewItems.length}\n`;
-  summary += `🔁 ملفات مكررة محتملة: ${duplicates.size}\n`;
-  summary += `🗑 عناصر تم تجاهلها: ${items.length - activeItems.length}`;
+  let preview = `معاينة محتوى الأسبوع ${session.week_number} ✅\n\n${sections.join("\n\n")}\n\n`;
+  preview += `📦 إجمالي العناصر: ${activeItems.length}\n`;
+  preview += `⚠️ عناصر تحتاج مراجعة: ${reviewItems.length}\n`;
+  preview += `🔁 ملفات مكررة محتملة: ${duplicates.size}\n`;
+  preview += `🗑 عناصر تم تجاهلها: ${items.length - activeItems.length}`;
 
   const buttons = [];
   if (reviewItems.length) {
@@ -356,59 +376,7 @@ async function showPreview(env, chatId, session) {
   }
   buttons.push([{ text: "🔄 تحديث المعاينة", callback_data: "refresh_preview" }]);
 
-  // Build a human-readable list from the very same ordered plan that will be
-  // published, so the preview reflects the actual order, including generated posts.
-  const knownItems = activeItems.filter((item) => item.subject_code);
-  const orderedPlan = buildPublishPlan(knownItems, session.week_number);
-  const byId = new Map(activeItems.map((item) => [Number(item.id), item]));
-  const detailLines = ["الترتيب الفعلي للنشر:"];
-  let currentGroup = null;
-  for (const entry of orderedPlan) {
-    if (entry.groupType !== currentGroup) {
-      currentGroup = entry.groupType;
-      detailLines.push(`\n${currentGroup === "lectures" ? "📚 المحاضرات" : currentGroup === "sections" ? "📝 السكاشن" : "📌 الملخصات"}`);
-    }
-    if (entry.kind === "copy") {
-      const item = byId.get(Number(entry.itemId));
-      if (!item) continue;
-      const subject = subjectName(item.subject_code);
-      const audioMark = Number(item.is_audio) ? "🎧 " : "";
-      const tagMark = ["sections", "summaries"].includes(item.group_type)
-        ? ` · ${SUBJECTS.find((value) => value.code === item.subject_code)?.hashtag || ""}`
-        : "";
-      detailLines.push(`  ${audioMark}• ${subject}: ${item.display_name}${tagMark}`);
-    } else if (entry.text_content || entry.text) {
-      const text = String(entry.text_content || entry.text || "").replace(/\n+/g, " / ");
-      if (text.includes("━")) detailLines.push("  ───────────────");
-      else detailLines.push(`  ↳ ${text}`);
-    }
-  }
-
-  if (reviewItems.length) {
-    detailLines.push("\n⚠️ عناصر تحتاج تصنيفًا يدويًا:");
-    for (const item of reviewItems.slice(0, 15)) detailLines.push(`  • ${item.display_name}`);
-    if (reviewItems.length > 15) detailLines.push(`  • وهناك ${reviewItems.length - 15} عناصر أخرى`);
-  }
-
-  const detailText = detailLines.join("\n");
-  const chunks = [];
-  let currentChunk = "";
-  for (const line of detailText.split("\n")) {
-    const candidate = currentChunk ? `${currentChunk}\n${line}` : line;
-    if (candidate.length > 3300 && currentChunk) {
-      chunks.push(currentChunk);
-      currentChunk = line;
-    } else {
-      currentChunk = candidate;
-    }
-  }
-  if (currentChunk) chunks.push(currentChunk);
-
-  await sendInline(env, chatId, summary.slice(0, 3900), buttons);
-  for (const chunk of chunks) {
-    await telegramApi(env, "sendMessage", { chat_id: chatId, text: chunk.slice(0, 3900) });
-  }
-
+  await sendInline(env, chatId, preview.slice(0, 3900), buttons);
   await reply(env, chatId, session.status === "collecting"
     ? "الاستقبال ما زال مفتوحًا. تقدر تكمل إرسال الملفات، وبعدها اضغط «إنهاء الاستقبال»."
     : session.status === "ready"
@@ -496,6 +464,12 @@ async function cancelCurrentSession(env, chatId, session) {
   await reply(env, chatId, `تم إلغاء عملية الأسبوع ${session.week_number ?? "الجديد"}. تقدر تبدأ عملية جديدة في أي وقت.`);
 }
 
+function getPublishDestination(env, session) {
+  // CHANNEL_ID is an optional deployment-wide default. When omitted, the
+  // owner chooses a destination per week and it is persisted in D1.
+  return String(env.CHANNEL_ID || session?.target_chat_id || "").trim();
+}
+
 async function startPublishConfirmation(env, chatId, session) {
   if (!session) {
     await reply(env, chatId, "مفيش محتوى جاهز للنشر. ابدأ أسبوعًا جديدًا أولًا.");
@@ -521,6 +495,16 @@ async function startPublishConfirmation(env, chatId, session) {
     await sendInline(env, chatId,
       `لا يمكن تجهيز النشر حاليًا؛ يوجد ${review.length} عنصر غير مصنف. صحح تصنيفها أو تجاهلها أولًا.`,
       [[{ text: "🛠 تصحيح التصنيف", callback_data: "listc:0" }], [{ text: "🗑 تجاهل عنصر", callback_data: "listi:0" }]],
+    );
+    return;
+  }
+
+  if (!getPublishDestination(env, session)) {
+    await env.DB.prepare(
+      `UPDATE sessions SET awaiting_destination = 1, updated_at = ? WHERE id = ?`,
+    ).bind(nowIso(), session.id).run();
+    await reply(env, chatId,
+      "معرف القناة غير محدد في إعدادات المشروع، وده اختياري ✅\n\nابعت الآن وجهة النشر بإحدى الطرق التالية:\n• @ChannelUsername للقناة العامة\n• -1001234567890 للقناة الخاصة\n• رابط t.me للقناة العامة\n\nلازم تضيف البوت للقناة كمسؤول وتمنحه صلاحية نشر الرسائل. تقدر تلغي العملية من زر «إلغاء العملية».",
     );
     return;
   }
@@ -551,8 +535,8 @@ async function startPublishConfirmation(env, chatId, session) {
 
   const planCount = plan.length;
   await sendInline(env, chatId,
-    `تم تجهيز خطة النشر للأسبوع ${session.week_number} ✅\n\nعدد الرسائل والمنشورات: ${planCount}\nسيتم النشر بالترتيب: المحاضرات، ثم السكاشن، ثم الملخصات.\n\nهل تؤكد النشر في القناة؟`,
-    [[{ text: "✅ تأكيد النشر", callback_data: `publish_yes:${session.id}` }], [{ text: "إلغاء والعودة", callback_data: `publish_no:${session.id}` }]],
+    `تم تجهيز خطة النشر للأسبوع ${session.week_number} ✅\n\nوجهة النشر: ${getPublishDestination(env, session)}\nعدد الرسائل والمنشورات: ${planCount}\nسيتم النشر بالترتيب: المحاضرات، ثم السكاشن، ثم الملخصات.\n\nهل تؤكد النشر؟`,
+    [[{ text: "✅ تأكيد النشر", callback_data: "publish_yes" }], [{ text: "إلغاء والعودة", callback_data: "publish_no" }]],
   );
 }
 
@@ -560,10 +544,10 @@ async function getItemForPlan(env, itemId) {
   return env.DB.prepare(`SELECT * FROM items WHERE id = ? LIMIT 1`).bind(itemId).first();
 }
 
-async function copyMessageWithFileIdFallback(env, item, payload, extra = {}) {
+async function copyMessageWithFileIdFallback(env, item, payload, destinationChatId, extra = {}) {
   const source = { chat_id: item.source_chat_id, message_id: item.source_message_id };
   try {
-    return await telegramApi(env, "copyMessage", { chat_id: env.CHANNEL_ID, ...source, ...extra });
+    return await telegramApi(env, "copyMessage", { chat_id: destinationChatId, ...source, ...extra });
   } catch (copyError) {
     // The original private-chat message may have been deleted after intake.
     // Reuse the stored file_id as a fallback for ordinary media types.
@@ -581,7 +565,7 @@ async function copyMessageWithFileIdFallback(env, item, payload, extra = {}) {
       const media = methodByKind[item.media_kind];
       if (media) {
         const [method, field] = media;
-        const fallbackPayload = { chat_id: env.CHANNEL_ID, [field]: item.file_id };
+        const fallbackPayload = { chat_id: destinationChatId, [field]: item.file_id };
         const caption = extra.caption ?? payload.caption;
         const captionEntities = extra.caption_entities ?? payload.caption_entities;
         if (caption && ["document", "photo", "audio", "voice", "video", "animation"].includes(item.media_kind)) {
@@ -595,7 +579,7 @@ async function copyMessageWithFileIdFallback(env, item, payload, extra = {}) {
     // Text messages can also be reconstructed from their saved Telegram payload.
     if (payload.text) {
       return telegramApi(env, "sendMessage", {
-        chat_id: env.CHANNEL_ID,
+        chat_id: destinationChatId,
         text: payload.text,
         ...(payload.entities?.length ? { entities: payload.entities } : {}),
       });
@@ -604,9 +588,9 @@ async function copyMessageWithFileIdFallback(env, item, payload, extra = {}) {
   }
 }
 
-async function executePlanEntry(env, chatId, entry) {
+async function executePlanEntry(env, destinationChatId, entry) {
   if (entry.kind === "text") {
-    const sent = await sendMessage(env, env.CHANNEL_ID, entry.text_content || "");
+    const sent = await sendMessage(env, destinationChatId, entry.text_content || "");
     return sent.message_id;
   }
 
@@ -619,7 +603,7 @@ async function executePlanEntry(env, chatId, entry) {
   catch { throw new Error(`تعذر قراءة بيانات العنصر رقم ${item.id}.`); }
 
   if (!Number(entry.add_hashtag)) {
-    const copied = await copyMessageWithFileIdFallback(env, item, payload);
+    const copied = await copyMessageWithFileIdFallback(env, item, payload, destinationChatId);
     return copied.message_id;
   }
 
@@ -634,7 +618,7 @@ async function executePlanEntry(env, chatId, entry) {
     const merged = appendHashtagEntity(payload.entities || [], text, hashtag);
     if (merged.text.length <= 4096) {
       const sent = await telegramApi(env, "sendMessage", {
-        chat_id: env.CHANNEL_ID,
+        chat_id: destinationChatId,
         text: merged.text,
         ...(merged.entities.length ? { entities: merged.entities } : {}),
       });
@@ -645,7 +629,7 @@ async function executePlanEntry(env, chatId, entry) {
   if (canUseCaption) {
     const merged = appendHashtagEntity(payload.caption_entities || [], caption, hashtag);
     if (merged.text.length <= 1024) {
-      const copied = await copyMessageWithFileIdFallback(env, item, payload, {
+      const copied = await copyMessageWithFileIdFallback(env, item, payload, destinationChatId, {
         caption: merged.text,
         ...(merged.entities.length ? { caption_entities: merged.entities } : {}),
       });
@@ -655,7 +639,7 @@ async function executePlanEntry(env, chatId, entry) {
 
   // For media types that do not support captions (voice notes, video notes,
   // stickers, etc.), the plan contains a separate hashtag text item after the copy.
-  const copied = await copyMessageWithFileIdFallback(env, item, payload);
+  const copied = await copyMessageWithFileIdFallback(env, item, payload, destinationChatId);
   return copied.message_id;
 }
 
@@ -699,13 +683,19 @@ async function sendPublishProgress(env, chatId, sessionId) {
   await env.DB.prepare(`UPDATE sessions SET status = 'publishing', updated_at = ? WHERE id = ?`).bind(nowIso(), sessionId).run();
   await sendInline(env, chatId,
     `جارٍ نشر الأسبوع.\n\n✅ تم: ${done}/${total}\n⏳ متبقٍ: ${pending}\n\nاضغط متابعة لاستكمال الدفعة التالية.`,
-    [[{ text: "▶️ متابعة النشر", callback_data: `continue_publish:${sessionId}` }]],
+    [[{ text: "▶️ متابعة النشر", callback_data: "continue_publish" }]],
   );
 }
 
 async function publishNextBatch(env, chatId, session) {
   if (!session) {
     await reply(env, chatId, "لا توجد عملية نشر حالية.");
+    return;
+  }
+
+  const destinationChatId = getPublishDestination(env, session);
+  if (!destinationChatId) {
+    await reply(env, chatId, "وجهة النشر غير محددة. اضغط «نشر المحتوى» وحدد القناة أولًا.");
     return;
   }
 
@@ -741,7 +731,7 @@ async function publishNextBatch(env, chatId, session) {
     ).bind(nowIso(), entry.id).run();
 
     try {
-      const messageId = await executePlanEntry(env, chatId, entry);
+      const messageId = await executePlanEntry(env, destinationChatId, entry);
       await env.DB.prepare(
         `UPDATE publish_plan SET status = 'sent', telegram_message_id = ?, sent_at = ?, last_error = NULL WHERE id = ?`,
       ).bind(messageId || null, nowIso(), entry.id).run();
@@ -795,33 +785,23 @@ async function handleCallback(env, callback) {
     await startPublishConfirmation(env, chatId, active);
     return;
   }
-  if (data.startsWith("publish_yes:")) {
-    const requestedSessionId = Number(data.split(":")[1]);
-    if (!active || active.id !== requestedSessionId || active.status !== "ready") {
-      await reply(env, chatId, "لم تعد هذه العملية جاهزة للتأكيد. حدّث المعاينة للعملية الحالية.");
+  if (data === "publish_yes") {
+    if (!active || active.status !== "ready") {
+      await reply(env, chatId, "لم تعد هناك عملية جاهزة للتأكيد. حدّث المعاينة أولًا.");
       return;
     }
     await env.DB.prepare(`UPDATE sessions SET status = 'publishing', updated_at = ? WHERE id = ?`).bind(nowIso(), active.id).run();
     await publishNextBatch(env, chatId, { ...active, status: "publishing" });
     return;
   }
-  if (data.startsWith("publish_no:")) {
-    const requestedSessionId = Number(data.split(":")[1]);
-    if (active && active.id === requestedSessionId && active.status === "ready") {
-      await env.DB.prepare(`DELETE FROM publish_plan WHERE session_id = ?`).bind(active.id).run();
-      await reply(env, chatId, "تم إلغاء تأكيد النشر. المحتوى ما زال محفوظًا ويمكنك معاينته أو تعديله.");
-    } else {
-      await reply(env, chatId, "هذه المعاينة لم تعد مرتبطة بالعملية الحالية.");
-    }
+  if (data === "publish_no") {
+    if (active) await env.DB.prepare(`DELETE FROM publish_plan WHERE session_id = ?`).bind(active.id).run();
+    await reply(env, chatId, "تم إلغاء تأكيد النشر. المحتوى ما زال محفوظًا ويمكنك معاينته أو تعديله.");
     return;
   }
-  if (data.startsWith("continue_publish:")) {
-    const requestedSessionId = Number(data.split(":")[1]);
-    if (active && active.id === requestedSessionId && active.status === "publishing") {
-      await publishNextBatch(env, chatId, active);
-    } else {
-      await reply(env, chatId, "لا توجد عملية نشر مستمرة مطابقة لهذا الزر.");
-    }
+  if (data === "continue_publish") {
+    if (active) await publishNextBatch(env, chatId, active);
+    else await reply(env, chatId, "لا توجد عملية نشر مستمرة.");
     return;
   }
 
@@ -834,10 +814,6 @@ async function handleCallback(env, callback) {
     return;
   }
   if (data.startsWith("ci:")) {
-    if (!active || !["collecting", "ready"].includes(active.status)) {
-      await reply(env, chatId, "لا يمكن تعديل التصنيف بعد بدء النشر أو انتهاء العملية.");
-      return;
-    }
     const id = Number(data.split(":")[1]);
     const item = active && await getItem(env, active.id, id);
     if (!item || Number(item.ignored)) {
@@ -853,10 +829,6 @@ async function handleCallback(env, callback) {
     return;
   }
   if (data.startsWith("cg:")) {
-    if (!active || !["collecting", "ready"].includes(active.status)) {
-      await reply(env, chatId, "لا يمكن تعديل التصنيف بعد بدء النشر أو انتهاء العملية.");
-      return;
-    }
     const [, idRaw, groupType] = data.split(":");
     const id = Number(idRaw);
     if (!active || !["lectures", "sections", "summaries"].includes(groupType)) return;
@@ -874,10 +846,6 @@ async function handleCallback(env, callback) {
     return;
   }
   if (data.startsWith("cs:")) {
-    if (!active || !["collecting", "ready"].includes(active.status)) {
-      await reply(env, chatId, "لا يمكن تعديل التصنيف بعد بدء النشر أو انتهاء العملية.");
-      return;
-    }
     const [, idRaw, groupType, subjectCode] = data.split(":");
     const id = Number(idRaw);
     const subject = SUBJECTS.find((value) => value.code === subjectCode);
@@ -891,10 +859,6 @@ async function handleCallback(env, callback) {
     return;
   }
   if (data.startsWith("ii:")) {
-    if (!active || !["collecting", "ready"].includes(active.status)) {
-      await reply(env, chatId, "لا يمكن تجاهل عناصر بعد بدء النشر أو انتهاء العملية.");
-      return;
-    }
     const id = Number(data.split(":")[1]);
     const item = active && await getItem(env, active.id, id);
     if (!item) return;
@@ -905,10 +869,6 @@ async function handleCallback(env, callback) {
     return;
   }
   if (data.startsWith("iy:")) {
-    if (!active || !["collecting", "ready"].includes(active.status)) {
-      await reply(env, chatId, "لا يمكن تجاهل عناصر بعد بدء النشر أو انتهاء العملية.");
-      return;
-    }
     const id = Number(data.split(":")[1]);
     if (!active) return;
     const item = await getItem(env, active.id, id);
@@ -926,12 +886,8 @@ async function handleCallback(env, callback) {
   }
   if (data.startsWith("retry:")) {
     const id = Number(data.split(":")[1]);
-    if (!active || active.status !== "publish_failed") {
-      await reply(env, chatId, "زر إعادة المحاولة لم يعد صالحًا للعملية الحالية.");
-      return;
-    }
-    const planEntry = await env.DB.prepare(`SELECT * FROM publish_plan WHERE id = ? AND session_id = ?`).bind(id, active.id).first();
-    if (!planEntry || !["failed", "sending"].includes(planEntry.status)) return;
+    const planEntry = active && await env.DB.prepare(`SELECT * FROM publish_plan WHERE id = ? AND session_id = ?`).bind(id, active.id).first();
+    if (!planEntry) return;
     await env.DB.prepare(`UPDATE publish_plan SET status = 'pending', last_error = NULL WHERE id = ?`).bind(id).run();
     await env.DB.prepare(`UPDATE sessions SET status = 'publishing', updated_at = ? WHERE id = ?`).bind(nowIso(), active.id).run();
     await publishNextBatch(env, chatId, { ...active, status: "publishing" });
@@ -939,12 +895,8 @@ async function handleCallback(env, callback) {
   }
   if (data.startsWith("skip:")) {
     const id = Number(data.split(":")[1]);
-    if (!active || active.status !== "publish_failed") {
-      await reply(env, chatId, "زر التخطي لم يعد صالحًا للعملية الحالية.");
-      return;
-    }
-    const planEntry = await env.DB.prepare(`SELECT * FROM publish_plan WHERE id = ? AND session_id = ?`).bind(id, active.id).first();
-    if (!planEntry || !["failed", "sending"].includes(planEntry.status)) return;
+    const planEntry = active && await env.DB.prepare(`SELECT * FROM publish_plan WHERE id = ? AND session_id = ?`).bind(id, active.id).first();
+    if (!planEntry) return;
     await env.DB.prepare(`UPDATE publish_plan SET status = 'skipped', last_error = 'Skipped manually' WHERE id = ?`).bind(id).run();
     await env.DB.prepare(`UPDATE sessions SET status = 'publishing', updated_at = ? WHERE id = ?`).bind(nowIso(), active.id).run();
     await publishNextBatch(env, chatId, { ...active, status: "publishing" });
@@ -960,19 +912,123 @@ async function handleUpdate(env, update) {
   }
 }
 
+const REQUIRED_D1_TABLES = ["sessions", "items", "publish_plan", "processed_updates"];
+
+async function getHealthStatus(env, requestUrl) {
+  const configuredOwner = ownerId(env);
+  const ownerIdConfigured = Boolean(
+    configuredOwner &&
+    /^[0-9]{5,20}$/.test(configuredOwner) &&
+    !configuredOwner.includes("REPLACE_WITH") &&
+    !configuredOwner.includes("YOUR_"),
+  );
+
+  const health = {
+    ok: false,
+    service: "weekly-telegram-organizer",
+    runtime: "cloudflare-workers",
+    checks: {
+      botTokenConfigured: Boolean(env.BOT_TOKEN),
+      botTokenValid: false,
+      webhookSecretConfigured: Boolean(env.WEBHOOK_SECRET),
+      webhookUrlRegistered: false,
+      webhookUrlMatchesWorker: false,
+      ownerIdConfigured,
+      databaseBindingConfigured: Boolean(env.DB),
+      defaultChannelConfigured: Boolean(env.CHANNEL_ID),
+      databaseReachable: false,
+      requiredTablesPresent: false,
+      optionalChannelMigrationApplied: false,
+    },
+    missingTables: [],
+    botUsername: null,
+    webhookUrl: null,
+  };
+
+  if (env.BOT_TOKEN) {
+    try {
+      const bot = await telegramApi(env, "getMe");
+      health.checks.botTokenValid = Boolean(bot?.id);
+      health.botUsername = bot?.username || null;
+    } catch (telegramError) {
+      console.error("Telegram getMe health check failed:", telegramError?.message || telegramError);
+    }
+
+    try {
+      const webhookInfo = await telegramApi(env, "getWebhookInfo");
+      const expectedUrl = `${new URL(requestUrl).origin}${WEBHOOK_PATH}`;
+      health.webhookUrl = webhookInfo?.url || null;
+      health.checks.webhookUrlRegistered = Boolean(webhookInfo?.url);
+      health.checks.webhookUrlMatchesWorker = webhookInfo?.url === expectedUrl;
+    } catch (telegramError) {
+      console.error("Telegram getWebhookInfo health check failed:", telegramError?.message || telegramError);
+    }
+  }
+
+  if (env.DB) {
+    try {
+      await env.DB.prepare("SELECT 1 AS ok").first();
+      health.checks.databaseReachable = true;
+
+      const tableResult = await env.DB.prepare(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?, ?, ?)`,
+      ).bind(...REQUIRED_D1_TABLES).all();
+      const foundTables = new Set((tableResult.results || []).map((row) => row.name));
+      health.missingTables = REQUIRED_D1_TABLES.filter((name) => !foundTables.has(name));
+      health.checks.requiredTablesPresent = health.missingTables.length === 0;
+
+      // The optional-channel feature requires these columns in migration 0002.
+      try {
+        await env.DB.prepare(
+          "SELECT target_chat_id, awaiting_destination FROM sessions LIMIT 0",
+        ).all();
+        health.checks.optionalChannelMigrationApplied = true;
+      } catch (migrationError) {
+        console.error("D1 migration 0002 is missing or incomplete:", migrationError?.message || migrationError);
+      }
+    } catch (databaseError) {
+      console.error("D1 health check failed:", databaseError?.stack || databaseError);
+    }
+  }
+
+  health.ok = health.checks.botTokenConfigured &&
+    health.checks.botTokenValid &&
+    health.checks.webhookSecretConfigured &&
+    health.checks.webhookUrlRegistered &&
+    health.checks.webhookUrlMatchesWorker &&
+    health.checks.ownerIdConfigured &&
+    health.checks.databaseBindingConfigured &&
+    health.checks.databaseReachable &&
+    health.checks.requiredTablesPresent &&
+    health.checks.optionalChannelMigrationApplied;
+
+  return health;
+}
+
+function isStartUpdate(update) {
+  const text = String(update?.message?.text || "").trim();
+  return /^\/start(?:@[A-Za-z0-9_]+)?(?:\s|$)/.test(text) || text === "ابدأ";
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
     if (url.pathname === "/health" && request.method === "GET") {
-      return Response.json({ ok: true, service: "weekly-telegram-organizer", runtime: "cloudflare-workers" });
+      const health = await getHealthStatus(env, request.url);
+      return Response.json(health, { status: health.ok ? 200 : 503 });
     }
 
     if (url.pathname !== WEBHOOK_PATH || request.method !== "POST") {
       return new Response("Not found", { status: 404 });
     }
 
-    if (!env.WEBHOOK_SECRET || request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.WEBHOOK_SECRET) {
+    if (!env.WEBHOOK_SECRET) {
+      console.error("WEBHOOK_SECRET is not configured in Worker secrets.");
+      return new Response("Worker configuration error: WEBHOOK_SECRET is missing", { status: 503 });
+    }
+    if (request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.WEBHOOK_SECRET) {
+      console.warn("Rejected Telegram webhook request: secret token mismatch.");
       return new Response("Unauthorized", { status: 401 });
     }
 
@@ -987,20 +1043,60 @@ export default {
       return new Response("Bad Update", { status: 400 });
     }
 
-    // Dedupe Telegram webhook retries. If processing fails, remove the marker so
-    // Telegram can retry the update instead of silently losing it.
-    const inserted = await env.DB.prepare(
-      `INSERT OR IGNORE INTO processed_updates (update_id) VALUES (?)`,
-    ).bind(update.update_id).run();
-    if (inserted.meta?.changes === 0) return new Response("OK", { status: 200 });
+    // /start is deliberately handled without D1 so the owner can still receive
+    // a welcome/setup response when the database binding or migrations are broken.
+    if (isStartUpdate(update)) {
+      try {
+        await handleUpdate(env, update);
+        return new Response("OK", { status: 200 });
+      } catch (error) {
+        console.error("Telegram /start handling failed:", error?.stack || error);
+        return new Response("Could not send /start response. Check BOT_TOKEN and Worker logs.", { status: 502 });
+      }
+    }
 
+    let markerCreated = false;
     try {
+      if (!env.DB) throw new Error("D1 binding 'DB' is missing from this Worker deployment.");
+
+      // The marker write is inside the try block. Missing D1 binding/tables now
+      // produce an actionable log instead of an unhandled exception.
+      const inserted = await env.DB.prepare(
+        `INSERT OR IGNORE INTO processed_updates (update_id) VALUES (?)`,
+      ).bind(update.update_id).run();
+      if (inserted.meta?.changes === 0) return new Response("OK", { status: 200 });
+      markerCreated = true;
+
       await handleUpdate(env, update);
       return new Response("OK", { status: 200 });
     } catch (error) {
       console.error("Webhook update failed:", error?.stack || error);
-      await env.DB.prepare(`DELETE FROM processed_updates WHERE update_id = ?`).bind(update.update_id).run();
-      return new Response("Temporary processing error", { status: 500 });
+      if (markerCreated) {
+        try {
+          await env.DB.prepare(`DELETE FROM processed_updates WHERE update_id = ?`)
+            .bind(update.update_id).run();
+        } catch (cleanupError) {
+          console.error("Failed to clear processed_updates marker:", cleanupError?.stack || cleanupError);
+        }
+      }
+      // Acknowledge the webhook after notifying the owner. This avoids Telegram
+      // retrying the same broken update forever when D1 configuration is wrong.
+      // The user can retry the action after /health becomes green; source files
+      // remain in the original Telegram chat and are never deleted.
+      const ownerChatId = update?.message?.chat?.id || update?.callback_query?.message?.chat?.id;
+      if (ownerChatId) {
+        try {
+          await telegramApi(env, "sendMessage", {
+            chat_id: ownerChatId,
+            text: "⚠️ حصل خطأ أثناء معالجة الطلب، ولم تكتمل العملية. افتح رابط /health لمعرفة هل المشكلة في التوكن أو Webhook أو قاعدة D1، ثم أعد المحاولة بعد الإصلاح.",
+            reply_markup: MAIN_KEYBOARD,
+          });
+        } catch (notifyError) {
+          console.error("Could not notify owner about webhook failure:", notifyError?.stack || notifyError);
+          return new Response("Temporary processing error. Check Cloudflare Worker logs.", { status: 500 });
+        }
+      }
+      return new Response("OK", { status: 200 });
     }
   },
 };

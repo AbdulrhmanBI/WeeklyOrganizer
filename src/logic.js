@@ -13,6 +13,24 @@ export const GROUPS = [
   { code: "summaries", label: "الملخصات" },
 ];
 
+
+/**
+ * Normalize a Telegram destination supplied by the owner. Accept public
+ * channel usernames, t.me links, or numeric chat IDs (including private
+ * channel IDs such as -1001234567890).
+ */
+export function normalizeChannelTarget(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  const usernameCandidate = raw.startsWith("@") ? raw.slice(1) : raw;
+  const usernameMatch = usernameCandidate.match(/^(?:(?:https?:\/\/)?(?:www\.)?t\.me\/)?([A-Za-z][A-Za-z0-9_]{4,31})\/?$/);
+  if (usernameMatch) return `@${usernameMatch[1]}`;
+
+  if (/^-100\d{8,}$/.test(raw) || /^-\d{6,}$/.test(raw)) return raw;
+  return null;
+}
+
 export const MAIN_BUTTONS = {
   newWeek: "🆕 أسبوع جديد",
   finish: "✅ إنهاء الاستقبال",
@@ -169,10 +187,10 @@ export function classifyTelegramMessage(message) {
     Boolean(subjectCode) &&
     /#/.test(text);
   const looksLikeGeneratedGroupFooter = media.mediaKind === "text" && (
-    /سكاشن\s+الأسبوع/i.test(text) ||
-    /ملخص\s+محاضرة\s+كل\s+مادة\s+الأسبوع/i.test(text)
+    /سكاشن\s+الأسبوع/.test(text) ||
+    /ملخص\s+محاضرة\s+كل\s+مادة/.test(text)
   );
-  const looksLikeDividerOnly = media.mediaKind === "text" && /^[\s━─—_\-=|•·]{3,}$/.test(text);
+  const looksLikeDividerOnly = media.mediaKind === "text" && /^[\s━─—_-]{8,}$/.test(text);
 
   return {
     ...media,
