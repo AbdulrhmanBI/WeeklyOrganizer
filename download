@@ -1,0 +1,6 @@
+node_modules/
+.wrangler/
+.dev.vars
+.webhook.env
+.env
+.DS_Store

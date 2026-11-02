@@ -1,0 +1,21 @@
+{
+  "name": "weekly-telegram-organizer-cloudflare",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Telegram weekly content organizer running on Cloudflare Workers and D1",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test",
+    "webhook:set": "node --env-file=.webhook.env scripts/set-webhook.mjs",
+    "webhook:info": "node --env-file=.webhook.env scripts/webhook-info.mjs",
+    "webhook:delete": "node --env-file=.webhook.env scripts/delete-webhook.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.156.1"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  }
+}

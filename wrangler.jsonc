@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "weekly-telegram-organizer",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-30",
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "BOT_OWNER_ID": "REPLACE_WITH_YOUR_TELEGRAM_USER_ID",
+    "CHANNEL_ID": "@REPLACE_WITH_YOUR_CHANNEL_USERNAME"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "weekly-telegram-organizer-db",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
