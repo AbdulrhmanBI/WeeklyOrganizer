@@ -13,8 +13,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "weekly-telegram-organizer-db",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "database_name": "organizer",
+      "database_id": "132a665e-788e-454c-aaca-917b1d0d7d67",
       "migrations_dir": "migrations"
     }
   ]
