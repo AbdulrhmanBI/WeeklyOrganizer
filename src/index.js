@@ -372,6 +372,7 @@ async function showPreview(env, chatId, session) {
     buttons.push([{ text: "🛠 تصحيح العناصر غير المصنفة", callback_data: "listc:0" }]);
   }
   if (session.status === "ready" && !reviewItems.length) {
+    buttons.push([{ text: "📩 إرسال نسخة تجريبية للشات", callback_data: "preview_send:0" }]);
     buttons.push([{ text: "🚀 تجهيز النشر", callback_data: "prepare_publish" }]);
   }
   buttons.push([{ text: "🔄 تحديث المعاينة", callback_data: "refresh_preview" }]);
@@ -382,6 +383,91 @@ async function showPreview(env, chatId, session) {
     : session.status === "ready"
       ? (reviewItems.length ? "راجع العناصر غير المصنفة قبل النشر." : "المحتوى جاهز للمراجعة والنشر.")
       : `حالة العملية: ${session.status}`);
+}
+
+async function sendPreviewBatch(env, chatId, session, offset = 0) {
+  if (!session || session.status !== "ready") {
+    await reply(env, chatId, "المعاينة التجريبية متاحة بعد إنهاء استقبال الملفات وتجهيز الأسبوع.");
+    return;
+  }
+
+  const items = await getItems(env, session.id);
+  const activeItems = items.filter((item) => !Number(item.ignored));
+  const reviewItems = activeItems.filter((item) => !item.subject_code || item.classification_status === "review");
+
+  if (reviewItems.length) {
+    await sendInline(env, chatId,
+      `لا يمكن إرسال المعاينة التجريبية قبل تصحيح ${reviewItems.length} عنصر غير مصنف.`,
+      [
+        [{ text: "🛠 تصحيح التصنيف", callback_data: "listc:0" }],
+        [{ text: "🔄 تحديث المعاينة", callback_data: "refresh_preview" }],
+      ],
+    );
+    return;
+  }
+
+  // Use the exact same plan builder as channel publishing. The only difference
+  // is the destination: the owner's private chat instead of the target channel.
+  const plan = buildPublishPlan(activeItems, session.week_number);
+  if (!plan.length) {
+    await reply(env, chatId, "لا توجد عناصر قابلة للإرسال في المعاينة.");
+    return;
+  }
+
+  const requestedOffset = Number(offset);
+  const start = Number.isSafeInteger(requestedOffset)
+    ? Math.max(0, Math.min(requestedOffset, plan.length))
+    : 0;
+
+  if (start === 0) {
+    await reply(env, chatId,
+      `دي نسخة تجريبية للأسبوع ${session.week_number} 📩\n` +
+      "هتظهر الملفات والرسائل بنفس ترتيب وطريقة إرسالها للقناة.\n\n" +
+      "المحتوى ده هيوصلك في الشات ده فقط، ومش هيتنشر في القناة.",
+    );
+  }
+
+  const batch = plan.slice(start, start + PUBLISH_BATCH_SIZE);
+  for (let index = 0; index < batch.length; index += 1) {
+    const entry = batch[index];
+    try {
+      await executePlanEntry(env, chatId, {
+        kind: entry.kind,
+        text_content: entry.text,
+        item_id: entry.itemId,
+        add_hashtag: entry.addHashtag ? 1 : 0,
+        subject_code: entry.subjectCode,
+      });
+    } catch (error) {
+      const failedOffset = start + index;
+      await sendInline(env, chatId,
+        `تعذر إرسال عنصر المعاينة رقم ${failedOffset + 1} من ${plan.length}.\n` +
+        `الخطأ: ${String(error?.message || error).slice(0, 500)}\n\n` +
+        "العناصر التي وصلت قبله لم يتم إرسالها مرة أخرى.",
+        [[{ text: "🔁 إعادة محاولة هذا العنصر", callback_data: `preview_send:${failedOffset}` }]],
+      );
+      return;
+    }
+  }
+
+  const nextOffset = start + batch.length;
+  if (nextOffset < plan.length) {
+    await sendInline(env, chatId,
+      `وصلت ${nextOffset} من ${plan.length} رسالة/ملف في المعاينة. اضغط متابعة لإرسال الجزء التالي.`,
+      [[{ text: "▶️ متابعة المعاينة", callback_data: `preview_send:${nextOffset}` }]],
+    );
+    return;
+  }
+
+  await sendInline(env, chatId,
+    `اكتملت المعاينة التجريبية للأسبوع ${session.week_number} ✅\n` +
+    `تم إرسال ${plan.length} رسالة/ملف في هذه المحادثة فقط.\n\n` +
+    "راجع شكل المحتوى، وبعدها ارجع للمعاينة واضغط «تجهيز النشر» لنشره في القناة.",
+    [
+      [{ text: "🔄 إعادة المعاينة من البداية", callback_data: "preview_send:0" }],
+      [{ text: "رجوع للمعاينة", callback_data: "refresh_preview" }],
+    ],
+  );
 }
 
 async function showStatus(env, chatId, session) {
@@ -779,6 +865,11 @@ async function handleCallback(env, callback) {
   }
   if (data === "refresh_preview") {
     await showPreview(env, chatId, active || await getLatestSession(env));
+    return;
+  }
+  if (data.startsWith("preview_send:")) {
+    const offset = Number(data.split(":")[1] || 0);
+    await sendPreviewBatch(env, chatId, active, offset);
     return;
   }
   if (data === "prepare_publish") {
