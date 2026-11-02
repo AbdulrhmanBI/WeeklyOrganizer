@@ -3,4 +3,5 @@ node_modules/
 .dev.vars
 .webhook.env
 .env
+*.sqlite3
 .DS_Store

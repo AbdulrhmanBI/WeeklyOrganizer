@@ -44,38 +44,26 @@ npm install
 npx wrangler login
 ```
 
-### 2. إنشاء قاعدة D1
+### 2. قاعدة D1 الموجودة
 
-```bash
-npx wrangler d1 create weekly-telegram-organizer-db
-```
+المشروع مضبوط على قاعدة D1 الحالية المرتبطة بالـWorker باسم `organizer` وبمعرّفها الحالي. لا تنشئ قاعدة جديدة ولا تغيّر `database_id`؛ تطبيق migrations على قاعدة أخرى سيجعل Worker يعمل على قاعدة فارغة أو مختلفة.
 
-سيطبع Wrangler قيمة `database_id`. افتح `wrangler.jsonc` واستبدل:
+### 3. إدخال بيانات المالك
 
-```jsonc
-"database_id": "REPLACE_WITH_D1_DATABASE_ID"
-```
+ملف `wrangler.jsonc` مضبوط على رقم حساب المالك `6453532232` واسم الـWorker الحالي `weeklyorganizer`. لا تغيّر الرقم إلا إذا تغيّر حساب المالك.
+`CHANNEL_ID` اختياري تمامًا ولا يلزم ضبطه. البوت سيطلب وجهة النشر من داخل المحادثة عند أول نشر إذا لم يكن هناك وجهة محفوظة للأسبوع.
 
-بالمعرف الحقيقي الذي ظهر لك.
+عند الضغط على زر «نشر المحتوى» وإذا لم يكن `CHANNEL_ID` مضبوطًا، سيطلب منك البوت وجهة النشر في المحادثة الخاصة. يمكنك إرسال أحد الخيارات التالية:
+- `@channelusername` للقناة العامة.
+- `-1001234567890` كـ Chat ID للقناة الخاصة.
+- رابط `https://t.me/channelusername` للقناة العامة.
 
-### 3. إدخال بيانات المالك والقناة
-
-في `wrangler.jsonc` عدّل:
-
-```jsonc
-"vars": {
-  "BOT_OWNER_ID": "REPLACE_WITH_YOUR_TELEGRAM_USER_ID",
-  "CHANNEL_ID": "@REPLACE_WITH_YOUR_CHANNEL_USERNAME"
-}
-```
-
-- `BOT_OWNER_ID`: رقم حسابك الرقمي على Telegram، وليس اسم المستخدم.
-- `CHANNEL_ID`: يفضل أن يكون `@channelusername` للقناة العامة. للقناة الخاصة يمكن استخدام Chat ID الرقمي بعد إضافتها للبوت.
+بعد إدخال الوجهة، يحفظها البوت مع الأسبوع الحالي في D1 ويستخدمها عند استكمال النشر. يجب إضافة البوت إلى القناة كمسؤول ومنحه صلاحية نشر الرسائل. إذا ضبطت `CHANNEL_ID` لاحقًا كمتغير بيئة، فسيكون هو الوجهة الافتراضية لجميع عمليات النشر.
 
 ### 4. إنشاء الجداول في D1
 
 ```bash
-npx wrangler d1 migrations apply weekly-telegram-organizer-db --remote
+npx wrangler d1 migrations apply organizer --remote
 ```
 
 ### 5. إضافة الأسرار
@@ -98,16 +86,10 @@ npx wrangler deploy
 سيظهر عنوان شبيه بـ:
 
 ```text
-https://weekly-telegram-organizer.YOUR_SUBDOMAIN.workers.dev
+https://weeklyorganizer.koala-x66.workers.dev
 ```
 
-افتح:
-
-```text
-https://weekly-telegram-organizer.YOUR_SUBDOMAIN.workers.dev/health
-```
-
-ويفترض أن تحصل على JSON يؤكد أن الخدمة تعمل.
+افتح `https://weeklyorganizer.koala-x66.workers.dev/health`. يعرض الفحص صلاحية BOT_TOKEN، وتطابق Webhook، واتصال D1، ووجود الجداول وأعمدة migration 0002، ولا يعرض أي قيمة سرية. يجب أن تكون عناصر `checks` صحيحة قبل بدء تنظيم أسبوع.
 
 ### 7. تسجيل Webhook مع Telegram
 
@@ -116,7 +98,7 @@ https://weekly-telegram-organizer.YOUR_SUBDOMAIN.workers.dev/health
 ```env
 BOT_TOKEN=YOUR_BOT_TOKEN
 WEBHOOK_SECRET=THE_SAME_SECRET_YOU_ADDED_TO_WRANGLER
-WORKER_URL=https://weekly-telegram-organizer.YOUR_SUBDOMAIN.workers.dev
+WORKER_URL=https://weeklyorganizer.koala-x66.workers.dev
 ```
 
 ثم شغّل:
@@ -130,6 +112,8 @@ npm run webhook:set
 ```bash
 npm run webhook:info
 ```
+
+يمكنك أيضًا فتح `/health` في المتصفح؛ سيقارن رابط Webhook المسجل بالرابط الفعلي للـWorker ويتأكد من صلاحية التوكن ووصول D1.
 
 هذا الملف مستثنى من Git عن طريق `.gitignore`. لا تشاركه ولا ترفعه إلى مستودع عام.
 
@@ -179,6 +163,17 @@ npm run webhook:info
 - أضف البوت كمسؤول في القناة مع صلاحية نشر الرسائل.
 - لا تشغل نسخة Long Polling قديمة بالتوكن نفسه بعد تسجيل Webhook؛ Telegram لا يسمح باستقبال `getUpdates` مع Webhook فعال.
 - هذه النسخة تعتمد على Worker Free وD1 Free ضمن حدود الاستخدام الحالية. راجع صفحة Cloudflare Limits وD1 Pricing لأن الحدود والسياسات قد تتغير.
+
+## تشخيص الأخطاء
+
+- `401` على `/telegram/webhook`: قيمة `WEBHOOK_SECRET` في Cloudflare لا تطابق `secret_token` المسجل لدى Telegram.
+- `500` على `/telegram/webhook`: راجع Exception في Worker Logs؛ النسخة الحالية تسجل الخطأ الأصلي، وتضع عملية D1 داخل كتلة المعالجة حتى لا تضيع تفاصيل الاستثناء.
+- `/health` يعرض `requiredTablesPresent=false`: طبّق `npx wrangler d1 migrations apply organizer --remote`.
+- `/health` يعرض `optionalChannelMigrationApplied=false`: migration `0002` لم تُطبّق على قاعدة `organizer` بعد؛ نفّذ أمر migrations أعلاه.
+- `/health` يعرض `botTokenValid=false`: التوكن غير صحيح أو تم عمل Revoke له؛ ضع التوكن الجديد في Worker Secret باسم `BOT_TOKEN`.
+- `/health` يعرض `webhookUrlMatchesWorker=false`: أعد تسجيل Webhook على رابط `/telegram/webhook` الخاص بهذا الـWorker مع نفس `WEBHOOK_SECRET`.
+
+رسالة `/start` تُعالج دون الاعتماد على D1، حتى يمكن اختبار التوكن والمالك واستلام لوحة التحكم عند تعطل قاعدة البيانات. باقي عمليات البوت تحتاج D1 سليمًا.
 
 ## الاختبارات
 
