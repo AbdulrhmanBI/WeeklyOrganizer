@@ -81,7 +81,7 @@ async function createWeekSession(env, chatId) {
   const active = await getActiveSession(env);
   if (active) {
     const statusText = {
-      awaiting_week: "لسه مستني رقم الأسبوع للعملية الحالية.",
+      awaiting_week: active.awaiting_sections_week ? "لسه مستني رقم أسبوع السكاشن للعملية الحالية." : "لسه مستني رقم أسبوع المحاضرات للعملية الحالية.",
       collecting: "فيه أسبوع مفتوح لاستقبال الملفات. أنهِ الاستقبال أو ألغِ العملية الحالية أولًا.",
       ready: "فيه أسبوع جاهز للمعاينة أو النشر. انشره أو ألغِه قبل بدء أسبوع جديد.",
       publishing: "فيه عملية نشر جارية. استكمل النشر أو ألغِه قبل بدء أسبوع جديد.",
@@ -96,10 +96,10 @@ async function createWeekSession(env, chatId) {
      VALUES (?, ?, 'awaiting_week', ?, ?)`,
   ).bind(ownerId(env), String(chatId), nowIso(), nowIso()).run();
 
-  await reply(env, chatId, "نبدأ أسبوعًا جديدًا ✅\n\nاكتب رقم الأسبوع مرة واحدة. نفس الرقم سيُستخدم في رسائل المحاضرات والسكاشن والملخصات عند الحاجة.", {
+  await reply(env, chatId, "نبدأ أسبوعًا جديدًا ✅\n\nاكتب رقم أسبوع المحاضرات أولًا، مثل 6. بعده هسألك عن رقم أسبوع السكاشن بشكل منفصل.", {
     reply_markup: {
       ...MAIN_KEYBOARD,
-      input_field_placeholder: "مثال: 6",
+      input_field_placeholder: "رقم أسبوع المحاضرات، مثال: 6",
     },
   });
 }
@@ -258,9 +258,27 @@ async function handleMessage(env, message) {
     return;
   }
 
+  if (active?.awaiting_sections_week) {
+    if (!/^\d{1,3}$/.test(text)) {
+      await reply(env, chatId, "اكتب رقم أسبوع السكاشن كرقم صحيح من 1 إلى 99، أو اضغط زر التخطي لو مفيش سكاشن الأسبوع ده.");
+      return;
+    }
+    const sectionsWeek = Number(text);
+    if (sectionsWeek < 1 || sectionsWeek > 99) {
+      await reply(env, chatId, "رقم أسبوع السكاشن لازم يكون بين 1 و99، أو استخدم زر التخطي.");
+      return;
+    }
+    await env.DB.prepare(
+      `UPDATE sessions SET sections_week_number = ?, awaiting_sections_week = 0, status = 'collecting', updated_at = ? WHERE id = ?`,
+    ).bind(sectionsWeek, nowIso(), active.id).run();
+    await reply(env, chatId,
+      `تم تحديد أسبوع المحاضرات ${active.week_number} وأسبوع السكاشن ${sectionsWeek} ✅\n\nابعت كل الملفات والرسائل عن طريق Forward بأي ترتيب.\n\nلما تخلص اضغط «إنهاء الاستقبال».`);
+    return;
+  }
+
   if (active?.status === "awaiting_week") {
     if (!/^\d{1,3}$/.test(text)) {
-      await reply(env, chatId, "من فضلك اكتب رقم الأسبوع كرقم صحيح، مثل 6.");
+      await reply(env, chatId, "من فضلك اكتب رقم أسبوع المحاضرات كرقم صحيح، مثل 6.");
       return;
     }
     const week = Number(text);
@@ -269,10 +287,12 @@ async function handleMessage(env, message) {
       return;
     }
     await env.DB.prepare(
-      `UPDATE sessions SET week_number = ?, status = 'collecting', updated_at = ? WHERE id = ?`,
+      `UPDATE sessions SET week_number = ?, awaiting_sections_week = 1, updated_at = ? WHERE id = ?`,
     ).bind(week, nowIso(), active.id).run();
-    await reply(env, chatId,
-      `تم فتح استقبال الأسبوع ${week} ✅\n\nابعت كل الملفات والرسائل عن طريق Forward بأي ترتيب.\n\nلما تخلص اضغط «إنهاء الاستقبال».`);
+    await sendInline(env, chatId,
+      `تم تحديد رقم أسبوع المحاضرات: ${week} ✅\n\nدلوقتي اكتب رقم أسبوع السكاشن بشكل مستقل.\nمثال: لو محاضراتك أسبوع 6 والسكاشن أسبوع 2، اكتب 2 هنا.\n\nرقم Sec الموجود في اسم الملف هيُستخدم لترتيب السكاشن فقط، مش لتحديد رقم الأسبوع.`,
+      [[{ text: "تخطي رقم أسبوع السكاشن", callback_data: "skip_sections_week" }]],
+    );
     return;
   }
 
@@ -288,6 +308,10 @@ async function handleMessage(env, message) {
 }
 
 async function finishReceiving(env, chatId, session) {
+  if (session?.awaiting_sections_week) {
+    await reply(env, chatId, "قبل استقبال الملفات، اكتب رقم أسبوع السكاشن أو اضغط زر «تخطي رقم أسبوع السكاشن».");
+    return;
+  }
   if (!session) {
     await reply(env, chatId, "مفيش أسبوع مفتوح لإنهاء استقباله. اضغط «أسبوع جديد».");
     return;
@@ -361,7 +385,7 @@ async function showPreview(env, chatId, session) {
     return `${group === "lectures" ? "📚" : group === "sections" ? "📝" : "📌"} ${groupName(group)}: ${result.total}\n${result.lines.join("\n") || "  • لا توجد ملفات"}`;
   });
 
-  let preview = `معاينة محتوى الأسبوع ${session.week_number} ✅\n\n${sections.join("\n\n")}\n\n`;
+  let preview = `معاينة المحاضرات: الأسبوع ${session.week_number}${session.sections_week_number ? `\nمعاينة السكاشن: الأسبوع ${session.sections_week_number}` : ""} ✅\n\n${sections.join("\n\n")}\n\n`;
   preview += `📦 إجمالي العناصر: ${activeItems.length}\n`;
   preview += `⚠️ عناصر تحتاج مراجعة: ${reviewItems.length}\n`;
   preview += `🔁 ملفات مكررة محتملة: ${duplicates.size}\n`;
@@ -404,7 +428,7 @@ async function sendFullPreview(env, chatId, session, offset = 0) {
     return;
   }
 
-  const plan = buildPublishPlan(activeItems, session.week_number);
+  const plan = buildPublishPlan(activeItems, session.week_number, session.sections_week_number);
   if (!plan.length) {
     await reply(env, chatId, "لا توجد عناصر قابلة للإرسال في هذه العملية.");
     return;
@@ -477,7 +501,7 @@ async function showStatus(env, chatId, session) {
   }
 
   await reply(env, chatId,
-    `الأسبوع: ${session.week_number ?? "بانتظار الرقم"}\nالحالة: ${session.status}\n📦 العناصر المستلمة: ${count?.total || 0}\n✅ العناصر النشطة: ${count?.active || 0}\n⚠️ تحتاج مراجعة: ${count?.review || 0}${publishText}`);
+    `أسبوع المحاضرات: ${session.week_number ?? "بانتظار الرقم"}\nأسبوع السكاشن: ${session.sections_week_number ?? "غير محدد"}\nالحالة: ${session.status}\n📦 العناصر المستلمة: ${count?.total || 0}\n✅ العناصر النشطة: ${count?.active || 0}\n⚠️ تحتاج مراجعة: ${count?.review || 0}${publishText}`);
 }
 
 async function showItemPicker(env, chatId, session, mode, page) {
@@ -572,7 +596,7 @@ async function startPublishConfirmation(env, chatId, session) {
     return;
   }
 
-  const plan = buildPublishPlan(active, session.week_number);
+  const plan = buildPublishPlan(active, session.week_number, session.sections_week_number);
   if (!plan.length) {
     await reply(env, chatId, "لا توجد عناصر قابلة للنشر في هذه العملية.");
     return;
@@ -1017,6 +1041,19 @@ async function handleCallback(env, callback) {
   const data = String(callback.data || "");
   const active = await getActiveSession(env);
 
+  if (data === "skip_sections_week") {
+    if (!active || active.status !== "awaiting_week" || !Number(active.awaiting_sections_week)) {
+      await reply(env, chatId, "لا يوجد طلب حالي لتحديد رقم أسبوع السكاشن.");
+      return;
+    }
+    await env.DB.prepare(
+      `UPDATE sessions SET sections_week_number = NULL, awaiting_sections_week = 0, status = 'collecting', updated_at = ? WHERE id = ?`,
+    ).bind(nowIso(), active.id).run();
+    await reply(env, chatId,
+      `تم تخطي رقم أسبوع السكاشن. رقم المحاضرات هو ${active.week_number} ✅\n\nابعت الملفات عن طريق Forward، ولما تخلص اضغط «إنهاء الاستقبال».`);
+    return;
+  }
+
   if (data === "menu") {
     await reply(env, chatId, "استخدم أزرار لوحة التحكم.");
     return;
@@ -1188,6 +1225,7 @@ async function getHealthStatus(env, requestUrl) {
       databaseReachable: false,
       requiredTablesPresent: false,
       optionalChannelMigrationApplied: false,
+      sectionsWeekMigrationApplied: false,
     },
     missingTables: [],
     botUsername: null,
@@ -1235,6 +1273,15 @@ async function getHealthStatus(env, requestUrl) {
       } catch (migrationError) {
         console.error("D1 migration 0002 is missing or incomplete:", migrationError?.message || migrationError);
       }
+
+      try {
+        await env.DB.prepare(
+          "SELECT sections_week_number, awaiting_sections_week FROM sessions LIMIT 0",
+        ).all();
+        health.checks.sectionsWeekMigrationApplied = true;
+      } catch (migrationError) {
+        console.error("D1 migration 0003 is missing or incomplete:", migrationError?.message || migrationError);
+      }
     } catch (databaseError) {
       console.error("D1 health check failed:", databaseError?.stack || databaseError);
     }
@@ -1249,7 +1296,8 @@ async function getHealthStatus(env, requestUrl) {
     health.checks.databaseBindingConfigured &&
     health.checks.databaseReachable &&
     health.checks.requiredTablesPresent &&
-    health.checks.optionalChannelMigrationApplied;
+    health.checks.optionalChannelMigrationApplied &&
+    health.checks.sectionsWeekMigrationApplied;
 
   return health;
 }
