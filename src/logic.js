@@ -35,7 +35,7 @@ export const MAIN_BUTTONS = {
   newWeek: "🆕 أسبوع جديد",
   finish: "✅ إنهاء الاستقبال",
   preview: "👀 معاينة الترتيب",
-  publish: "🚀 نشر المحتوى",
+  publish: "🚀 نشر في القناة (اختياري)",
   classify: "🛠 تصحيح التصنيف",
   ignore: "🗑 تجاهل عنصر",
   status: "📊 حالة العملية",
@@ -183,7 +183,7 @@ export function classifyTelegramMessage(message) {
   const displayName = fileName || caption || text || (media.mediaKind === "text" ? "رسالة نصية" : `ملف ${media.mediaKind}`);
   const looksLikeGeneratedLectureAnnouncement =
     media.mediaKind === "text" &&
-    /محاضرة\s*\d+/i.test(text) &&
+    /(?:محاضرة\s*\d+|\d+\s+محاضرة)/i.test(text) &&
     Boolean(subjectCode) &&
     /#/.test(text);
   const looksLikeGeneratedGroupFooter = media.mediaKind === "text" && (
@@ -378,8 +378,7 @@ export function makeLectureAnnouncement(weekNumber, subjectCode) {
     STUDIES: "دراسات محاسبية",
   };
   const label = labels[subjectCode];
-  const spacer = subjectCode === "MA" ? "" : " ";
-  return `محاضرة ${weekNumber} (${label})${spacer}👆🏻\n\n${subject.hashtag}`;
+  return `☝🏻 (${label}) ${weekNumber} محاضرة\n\n${subject.hashtag}`;
 }
 
 export function appendHashtagToText(text = "", hashtag = "") {
