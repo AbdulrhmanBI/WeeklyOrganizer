@@ -11,7 +11,7 @@ import {
 import { telegramApi, sendMessage, inlineKeyboard } from "./telegram.js";
 
 const WEBHOOK_PATH = "/telegram/webhook";
-const PUBLISH_BATCH_SIZE = 4;
+const PUBLISH_BATCH_SIZE = 20;
 const ITEM_PAGE_SIZE = 8;
 
 function nowIso() {
@@ -61,15 +61,6 @@ async function reply(env, chatId, text, extra = {}) {
 async function sendInline(env, chatId, text, keyboardRows) {
   return telegramApi(env, "sendMessage", {
     chat_id: chatId,
-    text: String(text).slice(0, 4096),
-    reply_markup: inlineKeyboard(keyboardRows),
-  });
-}
-
-async function editInline(env, chatId, messageId, text, keyboardRows = []) {
-  return telegramApi(env, "editMessageText", {
-    chat_id: chatId,
-    message_id: messageId,
     text: String(text).slice(0, 4096),
     reply_markup: inlineKeyboard(keyboardRows),
   });
@@ -200,7 +191,7 @@ async function showWelcome(env, chatId) {
   await reply(
     env,
     chatId,
-    "أهلًا بك في Weekly Telegram Organizer 📚\n\nابعت ملفات الأسبوع عن طريق Forward بعد الضغط على «أسبوع جديد». هرتب المحاضرات والسكاشن والملخصات، وأعرض لك معاينة قبل النشر.\n\nاستخدم الأزرار الموجودة أسفل المحادثة للتحكم.",
+    "أهلًا بك في Weekly Telegram Organizer 📚\n\nابعت ملفات الأسبوع عن طريق Forward بعد الضغط على «أسبوع جديد». بعد إنهاء الاستقبال اضغط «معاينة الترتيب» لإرسال كل المحتوى مرتبًا في الشات. نشر المحتوى في القناة اختياري.\n\nاستخدم الأزرار الموجودة أسفل المحادثة للتحكم.",
   );
 }
 
@@ -226,7 +217,7 @@ async function handleMessage(env, message) {
     return;
   }
   if (text === MAIN_BUTTONS.preview) {
-    await showPreview(env, chatId, active);
+    await sendFullPreview(env, chatId, active || await getLatestSession(env));
     return;
   }
   if (text === MAIN_BUTTONS.publish) {
@@ -380,53 +371,42 @@ async function showPreview(env, chatId, session) {
   if (reviewItems.length) {
     buttons.push([{ text: "🛠 تصحيح العناصر غير المصنفة", callback_data: "listc:0" }]);
   }
-  if (session.status === "ready" && !reviewItems.length) {
-    buttons.push([{ text: "📩 إرسال نسخة تجريبية للشات", callback_data: "preview_send:0" }]);
-    buttons.push([{ text: "🚀 تجهيز النشر", callback_data: "prepare_publish" }]);
+  if (["ready", "completed"].includes(session.status) && !reviewItems.length) {
+    buttons.push([{ text: "📨 إرسال المحتوى كاملًا في الشات", callback_data: "preview_send:0" }]);
+    if (session.status === "ready") {
+      buttons.push([{ text: "🚀 نشر نسخة في القناة (اختياري)", callback_data: "prepare_publish" }]);
+    }
   }
   buttons.push([{ text: "🔄 تحديث المعاينة", callback_data: "refresh_preview" }]);
 
   await sendInline(env, chatId, preview.slice(0, 3900), buttons);
-  if (session.status === "collecting") {
-    await reply(env, chatId, "الاستقبال ما زال مفتوحًا. تقدر تكمل إرسال الملفات، وبعدها اضغط «إنهاء الاستقبال».");
-  } else if (session.status !== "ready") {
-    await reply(env, chatId, `حالة العملية: ${session.status}`);
-  }
+  await reply(env, chatId, session.status === "collecting"
+    ? "الاستقبال ما زال مفتوحًا. تقدر تكمل إرسال الملفات، وبعدها اضغط «إنهاء الاستقبال»."
+    : session.status === "ready"
+      ? (reviewItems.length ? "راجع العناصر غير المصنفة قبل النشر." : "المحتوى جاهز. اضغط «معاينة الترتيب» لإرسال كل الملفات هنا، والنشر في القناة اختياري.")
+      : `حالة العملية: ${session.status}`);
 }
 
-async function sendPreviewBatch(env, chatId, session, offset = 0, controlMessageId = 0) {
-  if (!session || session.status !== "ready") {
-    await reply(env, chatId, "المعاينة التجريبية متاحة بعد إنهاء استقبال الملفات وتجهيز الأسبوع.");
-    return;
-  }
-  if (!Number.isSafeInteger(Number(controlMessageId)) || Number(controlMessageId) <= 0) {
-    await reply(env, chatId, "تعذر تحديد رسالة التحكم بالمعاينة. افتح المعاينة من جديد وحاول مرة أخرى.");
+async function sendFullPreview(env, chatId, session, offset = 0) {
+  if (!session || !["ready", "completed"].includes(session.status)) {
+    await reply(env, chatId, "أنهِي استقبال الملفات أولًا، وبعدها اضغط «معاينة الترتيب» لإرسال المحتوى كاملًا إلى الشات.");
     return;
   }
 
   const items = await getItems(env, session.id);
   const activeItems = items.filter((item) => !Number(item.ignored));
   const reviewItems = activeItems.filter((item) => !item.subject_code || item.classification_status === "review");
-
   if (reviewItems.length) {
-    await editInline(env, chatId, Number(controlMessageId),
-      `لا يمكن إرسال المعاينة التجريبية قبل تصحيح ${reviewItems.length} عنصر غير مصنف.`,
-      [
-        [{ text: "🛠 تصحيح التصنيف", callback_data: "listc:0" }],
-        [{ text: "🔄 تحديث المعاينة", callback_data: "refresh_preview" }],
-      ],
+    await sendInline(env, chatId,
+      `لا يمكن إرسال المحتوى قبل تصحيح ${reviewItems.length} عنصر غير مصنف.`,
+      [[{ text: "🛠 تصحيح التصنيف", callback_data: "listc:0" }], [{ text: "🔄 تحديث المعاينة", callback_data: "refresh_preview" }]],
     );
     return;
   }
 
-  // Build precisely the same publication plan used for the channel.
-  // executePlanEntry() is also shared with the real publisher; only the target
-  // chat changes, so this sends real Telegram media/text messages to the owner.
   const plan = buildPublishPlan(activeItems, session.week_number);
   if (!plan.length) {
-    await editInline(env, chatId, Number(controlMessageId), "لا توجد عناصر قابلة للإرسال في المعاينة.", [
-      [{ text: "رجوع للمعاينة", callback_data: "refresh_preview" }],
-    ]);
+    await reply(env, chatId, "لا توجد عناصر قابلة للإرسال في هذه العملية.");
     return;
   }
 
@@ -435,56 +415,33 @@ async function sendPreviewBatch(env, chatId, session, offset = 0, controlMessage
     ? Math.max(0, Math.min(requestedOffset, plan.length))
     : 0;
 
-  // Keep progress controls on the original preview card. This prevents status
-  // messages from being inserted between the files and announcements themselves.
-  await editInline(env, chatId, Number(controlMessageId),
-    `⏳ جارٍ إرسال المعاينة الفعلية للأسبوع ${session.week_number}.\n\n` +
-    `تم إرسال ${start} من ${plan.length} رسالة/ملف حتى الآن.\n` +
-    "كل ما سيظهر بعد هذه الرسالة هو المحتوى التجريبي نفسه، بنفس ترتيب وخطوات النشر للقناة.\n" +
-    "لن يتم نشر أي شيء في القناة أثناء هذه الخطوة.",
-    [],
-  );
-
-  const batch = plan.slice(start, start + PUBLISH_BATCH_SIZE);
-  for (let index = 0; index < batch.length; index += 1) {
-    const entry = batch[index];
-    try {
-      await executePlanEntry(env, chatId, {
-        kind: entry.kind,
-        text_content: entry.text,
-        item_id: entry.itemId,
-        add_hashtag: entry.addHashtag ? 1 : 0,
-        subject_code: entry.subjectCode,
-      });
-    } catch (error) {
-      const failedOffset = start + index;
-      await editInline(env, chatId, Number(controlMessageId),
-        `⚠️ تعذر إرسال عنصر المعاينة رقم ${failedOffset + 1} من ${plan.length}.\n` +
-        `الخطأ: ${String(error?.message || error).slice(0, 500)}\n\n` +
-        "العناصر التي وصلت قبله موجودة بالفعل ولن نعيد إرسالها. اضغط لإعادة محاولة العنصر الذي فشل.",
-        [[{ text: "🔁 إعادة محاولة العنصر", callback_data: `preview_send:${failedOffset}` }]],
-      );
-      return;
-    }
+  if (start === 0) {
+    await reply(env, chatId,
+      `إرسال المحتوى الكامل للأسبوع ${session.week_number} 📚\n\n` +
+      "سيتم إرسال كل الملفات والرسائل هنا بنفس ترتيب النشر، مع تجميع ملفات PDF والتسجيلات المتجانسة في ألبومات.\n" +
+      "ده إرسال فعلي كامل إلى محادثتك الخاصة، وليس عينة، ولن ينشر في القناة.",
+    );
   }
 
-  const nextOffset = start + batch.length;
-  if (nextOffset < plan.length) {
-    await editInline(env, chatId, Number(controlMessageId),
-      `📩 المعاينة الفعلية للأسبوع ${session.week_number}\n\n` +
-      `تم إرسال ${nextOffset} من ${plan.length} رسالة/ملف.\n` +
-      "الملفات والرسائل نفسها وصلت أعلى هذه الرسالة بالترتيب النهائي. اضغط متابعة لإرسال الباقي.",
-      [[{ text: "▶️ متابعة المعاينة", callback_data: `preview_send:${nextOffset}` }]],
+  const result = await executePlanEntries(env, chatId, plan.slice(start), { persistPublishStatus: false });
+  if (result.error) {
+    const failedOffset = start + result.nextIndex;
+    await sendInline(env, chatId,
+      `وصل جزء من المحتوى، لكن تعذر إرسال العنصر رقم ${failedOffset + 1} من ${plan.length}.\n` +
+      `الخطأ: ${String(result.error?.message || result.error).slice(0, 500)}\n\n` +
+      "العناصر التي وصلت بالفعل لن نكرر إرسالها عند الاستكمال.",
+      [[{ text: "🔁 استكمال من العنصر المتوقف", callback_data: `preview_send:${failedOffset}` }]],
     );
     return;
   }
 
-  await editInline(env, chatId, Number(controlMessageId),
-    `✅ اكتملت المعاينة الفعلية للأسبوع ${session.week_number}.\n\n` +
-    `تم إرسال ${plan.length} رسالة/ملف إلى هذه المحادثة بنفس خطة النشر.\n` +
-    "راجع الملفات والرسائل التي وصلتك؛ لم يتم النشر في القناة.",
+  await sendInline(env, chatId,
+    `اكتمل إرسال محتوى الأسبوع ${session.week_number} إلى الشات ✅\n` +
+    `تم إرسال كل عناصر الخطة (${plan.length})، مع تجميع الملفات المتجانسة في ألبومات متى أمكن.\n\n` +
+    "النشر في القناة اختياري ويمكنك تنفيذه بعد مراجعة المحتوى.",
     [
-      [{ text: "🔄 إعادة المعاينة من البداية", callback_data: "preview_send:0" }],
+      ...(session.status === "ready" ? [[{ text: "🚀 نشر المحتوى في القناة (اختياري)", callback_data: "prepare_publish" }]] : []),
+      [{ text: "🔄 إعادة إرسال المحتوى كاملًا", callback_data: "preview_send:0" }],
       [{ text: "رجوع للمعاينة", callback_data: "refresh_preview" }],
     ],
   );
@@ -696,7 +653,17 @@ async function copyMessageWithFileIdFallback(env, item, payload, destinationChat
 
 async function executePlanEntry(env, destinationChatId, entry) {
   if (entry.kind === "text") {
-    const sent = await sendMessage(env, destinationChatId, entry.text_content || "");
+    const text = entry.text_content || "";
+    const firstLineEnd = text.indexOf("\n");
+    if (entry.group_type === "lectures" && text.startsWith("☝🏻 ") && firstLineEnd > 0) {
+      const sent = await telegramApi(env, "sendMessage", {
+        chat_id: destinationChatId,
+        text,
+        entities: [{ type: "blockquote", offset: 0, length: firstLineEnd }],
+      });
+      return sent.message_id;
+    }
+    const sent = await sendMessage(env, destinationChatId, text);
     return sent.message_id;
   }
 
@@ -747,6 +714,191 @@ async function executePlanEntry(env, destinationChatId, entry) {
   // stickers, etc.), the plan contains a separate hashtag text item after the copy.
   const copied = await copyMessageWithFileIdFallback(env, item, payload, destinationChatId);
   return copied.message_id;
+}
+
+
+const MEDIA_GROUP_KINDS = new Set(["document", "audio", "photo", "video"]);
+const MEDIA_GROUP_MAX = 10;
+
+function normalizePlanEntry(entry) {
+  return {
+    ...entry,
+    kind: entry.kind,
+    text_content: entry.text_content ?? entry.text ?? null,
+    item_id: entry.item_id ?? entry.itemId ?? null,
+    add_hashtag: entry.add_hashtag ?? (entry.addHashtag ? 1 : 0),
+    subject_code: entry.subject_code ?? entry.subjectCode ?? null,
+    group_type: entry.group_type ?? entry.groupType ?? null,
+  };
+}
+
+async function buildAlbumInput(env, rawEntry) {
+  const entry = normalizePlanEntry(rawEntry);
+  if (entry.kind !== "copy" || !entry.item_id) return null;
+  const item = await getItemForPlan(env, entry.item_id);
+  if (!item || !MEDIA_GROUP_KINDS.has(item.media_kind) || !item.file_id) return null;
+
+  let payload;
+  try { payload = JSON.parse(item.payload_json || "{}"); }
+  catch { throw new Error(`تعذر قراءة بيانات العنصر رقم ${item.id}.`); }
+
+  let caption = String(payload.caption || "");
+  let captionEntities = Array.isArray(payload.caption_entities) ? payload.caption_entities : [];
+  if (Number(entry.add_hashtag)) {
+    const subject = SUBJECTS.find((value) => value.code === entry.subject_code);
+    if (!subject) throw new Error("تعذر تحديد هاشتاج المادة أثناء تجميع الملفات.");
+    const merged = appendHashtagEntity(captionEntities, caption, subject.hashtag);
+    caption = merged.text;
+    captionEntities = merged.entities;
+  }
+  if (caption.length > 1024) return null;
+
+  const inputMedia = {
+    type: item.media_kind,
+    media: item.file_id,
+  };
+  if (caption) inputMedia.caption = caption;
+  if (captionEntities.length) inputMedia.caption_entities = captionEntities;
+
+  if (item.media_kind === "audio") {
+    if (payload.audio?.title) inputMedia.title = payload.audio.title;
+    if (payload.audio?.performer) inputMedia.performer = payload.audio.performer;
+  }
+  if (item.media_kind === "video" && payload.video?.supports_streaming) {
+    inputMedia.supports_streaming = true;
+  }
+  if (item.media_kind === "photo" && payload.has_media_spoiler) {
+    inputMedia.has_spoiler = true;
+  }
+
+  return {
+    entry,
+    item,
+    inputMedia,
+    key: [
+      item.group_type,
+      item.subject_code || "",
+      item.media_kind,
+      item.group_type === "sections" ? (item.section_number ?? "") : "",
+      item.group_type === "sections" ? Number(item.is_answer || 0) : "",
+      item.group_type === "summaries" ? (item.lecture_number ?? "") : "",
+    ].join("|"),
+  };
+}
+
+async function collectAlbum(env, entries, startIndex) {
+  const first = await buildAlbumInput(env, entries[startIndex]);
+  if (!first) return [];
+  const album = [first];
+  for (let i = startIndex + 1; i < entries.length && album.length < MEDIA_GROUP_MAX; i += 1) {
+    const next = await buildAlbumInput(env, entries[i]);
+    if (!next || next.key !== first.key) break;
+    album.push(next);
+  }
+  return album.length >= 2 ? album : [];
+}
+
+async function updatePublishEntry(env, entry, status, messageId = null, error = null) {
+  if (!entry?.id) return;
+  await env.DB.prepare(
+    `UPDATE publish_plan
+     SET status = ?, telegram_message_id = ?, sent_at = ?, last_error = ?
+     WHERE id = ?`,
+  ).bind(
+    status,
+    messageId,
+    status === "sent" ? nowIso() : null,
+    error ? String(error?.message || error).slice(0, 1000) : null,
+    entry.id,
+  ).run();
+}
+
+/**
+ * Sends a contiguous plan to a destination. Consecutive homogeneous documents,
+ * audio tracks, photos or videos are delivered as Telegram media albums (2-10).
+ * If Telegram rejects an album, it safely falls back to individual copies.
+ */
+async function executePlanEntries(env, destinationChatId, rawEntries, options = {}) {
+  const entries = rawEntries.map(normalizePlanEntry);
+  const persist = Boolean(options.persistPublishStatus);
+  let index = 0;
+  let fallbackAlbums = 0;
+
+  while (index < entries.length) {
+    const album = await collectAlbum(env, entries, index);
+    if (album.length >= 2) {
+      const albumEntries = album.map((part) => part.entry);
+      if (persist) {
+        for (const entry of albumEntries) {
+          await env.DB.prepare(
+            `UPDATE publish_plan SET status = 'sending', attempted_at = ?, last_error = NULL WHERE id = ?`,
+          ).bind(nowIso(), entry.id).run();
+        }
+      }
+
+      try {
+        const sentMessages = await telegramApi(env, "sendMediaGroup", {
+          chat_id: destinationChatId,
+          media: album.map((part) => part.inputMedia),
+        });
+        if (!Array.isArray(sentMessages) || sentMessages.length !== album.length) {
+          throw new Error("Telegram لم يرجع تأكيدًا لكل عناصر ألبوم الملفات.");
+        }
+        if (persist) {
+          for (let i = 0; i < albumEntries.length; i += 1) {
+            await updatePublishEntry(env, albumEntries[i], "sent", sentMessages[i]?.message_id || null);
+          }
+        }
+        index += album.length;
+        continue;
+      } catch (albumError) {
+        fallbackAlbums += 1;
+        // sendMediaGroup is atomic from the caller's perspective. If it fails,
+        // try each original item separately so no source file is silently lost.
+        for (let i = 0; i < albumEntries.length; i += 1) {
+          const entry = albumEntries[i];
+          try {
+            if (persist) {
+              await env.DB.prepare(
+                `UPDATE publish_plan SET status = 'sending', attempted_at = ?, last_error = NULL WHERE id = ?`,
+              ).bind(nowIso(), entry.id).run();
+            }
+            const messageId = await executePlanEntry(env, destinationChatId, entry);
+            if (persist) await updatePublishEntry(env, entry, "sent", messageId || null);
+            index += 1;
+          } catch (individualError) {
+            if (persist) {
+              await updatePublishEntry(env, entry, "failed", null, individualError);
+              for (let j = i + 1; j < albumEntries.length; j += 1) {
+                await env.DB.prepare(
+                  `UPDATE publish_plan SET status = 'pending', telegram_message_id = NULL, sent_at = NULL WHERE id = ?`,
+                ).bind(albumEntries[j].id).run();
+              }
+            }
+            return { error: individualError, nextIndex: index, fallbackAlbums };
+          }
+        }
+        continue;
+      }
+    }
+
+    const entry = entries[index];
+    try {
+      if (persist) {
+        await env.DB.prepare(
+          `UPDATE publish_plan SET status = 'sending', attempted_at = ?, last_error = NULL WHERE id = ?`,
+        ).bind(nowIso(), entry.id).run();
+      }
+      const messageId = await executePlanEntry(env, destinationChatId, entry);
+      if (persist) await updatePublishEntry(env, entry, "sent", messageId || null);
+      index += 1;
+    } catch (error) {
+      if (persist) await updatePublishEntry(env, entry, "failed", null, error);
+      return { error, nextIndex: index, fallbackAlbums };
+    }
+  }
+
+  return { error: null, nextIndex: index, fallbackAlbums };
 }
 
 async function sendPublishProgress(env, chatId, sessionId) {
@@ -831,24 +983,10 @@ async function publishNextBatch(env, chatId, session) {
     return;
   }
 
-  for (const entry of entries) {
-    await env.DB.prepare(
-      `UPDATE publish_plan SET status = 'sending', attempted_at = ?, last_error = NULL WHERE id = ?`,
-    ).bind(nowIso(), entry.id).run();
-
-    try {
-      const messageId = await executePlanEntry(env, destinationChatId, entry);
-      await env.DB.prepare(
-        `UPDATE publish_plan SET status = 'sent', telegram_message_id = ?, sent_at = ?, last_error = NULL WHERE id = ?`,
-      ).bind(messageId || null, nowIso(), entry.id).run();
-    } catch (error) {
-      await env.DB.prepare(
-        `UPDATE publish_plan SET status = 'failed', last_error = ? WHERE id = ?`,
-      ).bind(String(error?.message || error).slice(0, 1000), entry.id).run();
-      break;
-    }
+  const execution = await executePlanEntries(env, destinationChatId, entries, { persistPublishStatus: true });
+  if (execution.error) {
+    console.error("Publish batch stopped:", execution.error?.stack || execution.error);
   }
-
   await sendPublishProgress(env, chatId, session.id);
 }
 
@@ -889,8 +1027,7 @@ async function handleCallback(env, callback) {
   }
   if (data.startsWith("preview_send:")) {
     const offset = Number(data.split(":")[1] || 0);
-    const controlMessageId = Number(callback.message?.message_id || 0);
-    await sendPreviewBatch(env, chatId, active, offset, controlMessageId);
+    await sendFullPreview(env, chatId, active || await getLatestSession(env), offset);
     return;
   }
   if (data === "prepare_publish") {
