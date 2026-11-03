@@ -9,7 +9,7 @@ export const SUBJECTS = [
 
 export const GROUPS = [
   { code: "lectures", label: "المحاضرات" },
-  { code: "sections", label: "السكاشن" },
+  { code: "sections", label: "التمارين العملية" },
   { code: "summaries", label: "الملخصات" },
 ];
 
@@ -32,6 +32,8 @@ export function normalizeChannelTarget(value = "") {
 }
 
 export const MAIN_BUTTONS = {
+  home: "🏠 الرئيسية",
+  // Legacy labels remain recognized by the Worker for already-open Telegram keyboards.
   newWeek: "🆕 أسبوع جديد",
   finish: "✅ إنهاء الاستقبال",
   preview: "👀 معاينة الترتيب",
@@ -42,16 +44,13 @@ export const MAIN_BUTTONS = {
   cancel: "❌ إلغاء العملية",
 };
 
+// Keep one persistent navigation control. The real actions are shown contextually
+// in compact inline menus, so the chat never carries an eight-button control panel.
 export const MAIN_KEYBOARD = {
-  keyboard: [
-    [MAIN_BUTTONS.newWeek, MAIN_BUTTONS.finish],
-    [MAIN_BUTTONS.preview, MAIN_BUTTONS.publish],
-    [MAIN_BUTTONS.classify, MAIN_BUTTONS.ignore],
-    [MAIN_BUTTONS.status, MAIN_BUTTONS.cancel],
-  ].map((row) => row.map((text) => ({ text }))),
+  keyboard: [[{ text: MAIN_BUTTONS.home }]],
   resize_keyboard: true,
   is_persistent: true,
-  input_field_placeholder: "استخدم أزرار التحكم أو أرسل ملفات الأسبوع",
+  input_field_placeholder: "أرسل ملفات الأسبوع أو افتح القائمة الرئيسية",
 };
 
 export const GROUP_DIVIDERS = {
@@ -63,12 +62,27 @@ export const GROUP_DIVIDERS = {
 const ARABIC_ORDINALS = {
   1: "الأول", 2: "الثاني", 3: "الثالث", 4: "الرابع", 5: "الخامس",
   6: "السادس", 7: "السابع", 8: "الثامن", 9: "التاسع", 10: "العاشر",
+  11: "الحادي عشر", 12: "الثاني عشر", 13: "الثالث عشر", 14: "الرابع عشر",
+  15: "الخامس عشر", 16: "السادس عشر", 17: "السابع عشر", 18: "الثامن عشر",
+  19: "التاسع عشر", 20: "العشرون", 30: "الثلاثون", 40: "الأربعون",
+  50: "الخمسون", 60: "الستون", 70: "السبعون", 80: "الثمانون", 90: "التسعون",
+};
+const ARABIC_UNIT_ORDINALS = {
+  1: "الحادي", 2: "الثاني", 3: "الثالث", 4: "الرابع", 5: "الخامس",
+  6: "السادس", 7: "السابع", 8: "الثامن", 9: "التاسع",
+};
+const ARABIC_TENS_ORDINALS = {
+  20: "العشرون", 30: "الثلاثون", 40: "الأربعون", 50: "الخمسون",
+  60: "الستون", 70: "السبعون", 80: "الثمانون", 90: "التسعون",
 };
 
 export function formatWeekOrdinal(value) {
   const numeric = Number(value);
-  if (!Number.isInteger(numeric) || numeric < 1) return "";
-  return ARABIC_ORDINALS[numeric] || String(numeric);
+  if (!Number.isInteger(numeric) || numeric < 1 || numeric > 99) return "";
+  if (ARABIC_ORDINALS[numeric]) return ARABIC_ORDINALS[numeric];
+  const tens = Math.floor(numeric / 10) * 10;
+  const units = numeric % 10;
+  return `${ARABIC_UNIT_ORDINALS[units]} و${ARABIC_TENS_ORDINALS[tens]}`;
 }
 
 /**
@@ -77,7 +91,7 @@ export function formatWeekOrdinal(value) {
  */
 export function makeSectionsFooter(items, sectionsWeekNumber = null) {
   const label = formatWeekOrdinal(sectionsWeekNumber);
-  return label ? `☝🏻 سكاشن الأسبوع ${label}` : "☝🏻 سكاشن الأسبوع";
+  return label ? `☝🏻 التمارين العملية للأسبوع ${label}` : "☝🏻 التمارين العملية لهذا الأسبوع";
 }
 
 export function makeAvailabilityAnnouncement(items, lectureWeekNumber, sectionsWeekNumber = null) {
@@ -86,13 +100,17 @@ export function makeAvailabilityAnnouncement(items, lectureWeekNumber, sectionsW
   const hasSections = active.some((item) => item.group_type === "sections");
   if (!hasLectures && !hasSections) return null;
 
-  const parts = [];
   const lectureOrdinal = formatWeekOrdinal(lectureWeekNumber);
   const sectionsOrdinal = formatWeekOrdinal(sectionsWeekNumber);
-  if (hasLectures) parts.push(`محاضرات الأسبوع ${lectureOrdinal || lectureWeekNumber}`);
-  if (hasSections) parts.push(sectionsOrdinal ? `سكاشن الأسبوع ${sectionsOrdinal}` : "سكاشن الأسبوع");
+  const lectureText = `محاضرات الأسبوع ${lectureOrdinal || lectureWeekNumber}`;
+  const sectionsText = sectionsOrdinal
+    ? `التمارين العملية للأسبوع ${sectionsOrdinal}`
+    : "التمارين العملية لهذا الأسبوع";
+  const announcement = hasLectures && hasSections
+    ? `${lectureText} والتمارين العملية للأسبوع ${sectionsOrdinal || "الحالي"}`
+    : hasLectures ? lectureText : sectionsText;
 
-  return `${parts.join(" و")} متوفرة بالكامل على التشانل والبوت (@credit27_bot) ✅ بالتوفيق`;
+  return `${announcement} متاحة بالكامل عبر القناة والبوت (@credit27_bot) ✅ بالتوفيق`;
 }
 
 export const SUMMARIES_FOOTER = "☝🏻 ملخص محاضرات الأسبوع ده";
@@ -125,7 +143,7 @@ export function detectSubject(value = "") {
 
 export function detectGroup(value = "") {
   const text = normalizeText(value);
-  if (containsPattern(text, [/\bsections?\s*\d*\b/, /\bsec\s*\d*\b/, /سكاشن?/, /تمارين\s+السكشن/])) return "sections";
+  if (containsPattern(text, [/\bsections?\s*\d*\b/, /\bsec\s*\d*\b/, /سكاشن?/, /تمارين\s+السكشن/, /التمارين\s+العملية/, /تمرين\s+عملي/])) return "sections";
   if (containsPattern(text, [/\bsummaries\b/, /\bsummary\b/, /ملخصات?/, /تلخيص/])) return "summaries";
   // Assignments, handouts, worksheets and supplementary PDFs stay in Lectures unless
   // the file clearly identifies itself as a Section or Summary.
@@ -205,6 +223,7 @@ export function classifyTelegramMessage(message) {
     /#/.test(text);
   const looksLikeGeneratedGroupFooter = media.mediaKind === "text" && (
     /سكاشن\s+الأسبوع/.test(text) ||
+    /التمارين\s+العملية\s+(?:للأسبوع|لهذا\s+الأسبوع)/.test(text) ||
     /(?:ملخص\s+محاضرة\s+كل\s+مادة|ملخص\s+محاضرات\s+الأسبوع)/.test(text)
   );
   const looksLikeDividerOnly = media.mediaKind === "text" && /^[\s━─—_-]{8,}$/.test(text);
