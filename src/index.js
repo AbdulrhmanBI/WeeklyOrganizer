@@ -66,6 +66,15 @@ async function sendInline(env, chatId, text, keyboardRows) {
   });
 }
 
+async function editInline(env, chatId, messageId, text, keyboardRows = []) {
+  return telegramApi(env, "editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    text: String(text).slice(0, 4096),
+    reply_markup: inlineKeyboard(keyboardRows),
+  });
+}
+
 async function answerCallback(env, callbackId, text = "") {
   try {
     await telegramApi(env, "answerCallbackQuery", {
@@ -378,16 +387,20 @@ async function showPreview(env, chatId, session) {
   buttons.push([{ text: "🔄 تحديث المعاينة", callback_data: "refresh_preview" }]);
 
   await sendInline(env, chatId, preview.slice(0, 3900), buttons);
-  await reply(env, chatId, session.status === "collecting"
-    ? "الاستقبال ما زال مفتوحًا. تقدر تكمل إرسال الملفات، وبعدها اضغط «إنهاء الاستقبال»."
-    : session.status === "ready"
-      ? (reviewItems.length ? "راجع العناصر غير المصنفة قبل النشر." : "المحتوى جاهز للمراجعة والنشر.")
-      : `حالة العملية: ${session.status}`);
+  if (session.status === "collecting") {
+    await reply(env, chatId, "الاستقبال ما زال مفتوحًا. تقدر تكمل إرسال الملفات، وبعدها اضغط «إنهاء الاستقبال».");
+  } else if (session.status !== "ready") {
+    await reply(env, chatId, `حالة العملية: ${session.status}`);
+  }
 }
 
-async function sendPreviewBatch(env, chatId, session, offset = 0) {
+async function sendPreviewBatch(env, chatId, session, offset = 0, controlMessageId = 0) {
   if (!session || session.status !== "ready") {
     await reply(env, chatId, "المعاينة التجريبية متاحة بعد إنهاء استقبال الملفات وتجهيز الأسبوع.");
+    return;
+  }
+  if (!Number.isSafeInteger(Number(controlMessageId)) || Number(controlMessageId) <= 0) {
+    await reply(env, chatId, "تعذر تحديد رسالة التحكم بالمعاينة. افتح المعاينة من جديد وحاول مرة أخرى.");
     return;
   }
 
@@ -396,7 +409,7 @@ async function sendPreviewBatch(env, chatId, session, offset = 0) {
   const reviewItems = activeItems.filter((item) => !item.subject_code || item.classification_status === "review");
 
   if (reviewItems.length) {
-    await sendInline(env, chatId,
+    await editInline(env, chatId, Number(controlMessageId),
       `لا يمكن إرسال المعاينة التجريبية قبل تصحيح ${reviewItems.length} عنصر غير مصنف.`,
       [
         [{ text: "🛠 تصحيح التصنيف", callback_data: "listc:0" }],
@@ -406,11 +419,14 @@ async function sendPreviewBatch(env, chatId, session, offset = 0) {
     return;
   }
 
-  // Use the exact same plan builder as channel publishing. The only difference
-  // is the destination: the owner's private chat instead of the target channel.
+  // Build precisely the same publication plan used for the channel.
+  // executePlanEntry() is also shared with the real publisher; only the target
+  // chat changes, so this sends real Telegram media/text messages to the owner.
   const plan = buildPublishPlan(activeItems, session.week_number);
   if (!plan.length) {
-    await reply(env, chatId, "لا توجد عناصر قابلة للإرسال في المعاينة.");
+    await editInline(env, chatId, Number(controlMessageId), "لا توجد عناصر قابلة للإرسال في المعاينة.", [
+      [{ text: "رجوع للمعاينة", callback_data: "refresh_preview" }],
+    ]);
     return;
   }
 
@@ -419,13 +435,15 @@ async function sendPreviewBatch(env, chatId, session, offset = 0) {
     ? Math.max(0, Math.min(requestedOffset, plan.length))
     : 0;
 
-  if (start === 0) {
-    await reply(env, chatId,
-      `دي نسخة تجريبية للأسبوع ${session.week_number} 📩\n` +
-      "هتظهر الملفات والرسائل بنفس ترتيب وطريقة إرسالها للقناة.\n\n" +
-      "المحتوى ده هيوصلك في الشات ده فقط، ومش هيتنشر في القناة.",
-    );
-  }
+  // Keep progress controls on the original preview card. This prevents status
+  // messages from being inserted between the files and announcements themselves.
+  await editInline(env, chatId, Number(controlMessageId),
+    `⏳ جارٍ إرسال المعاينة الفعلية للأسبوع ${session.week_number}.\n\n` +
+    `تم إرسال ${start} من ${plan.length} رسالة/ملف حتى الآن.\n` +
+    "كل ما سيظهر بعد هذه الرسالة هو المحتوى التجريبي نفسه، بنفس ترتيب وخطوات النشر للقناة.\n" +
+    "لن يتم نشر أي شيء في القناة أثناء هذه الخطوة.",
+    [],
+  );
 
   const batch = plan.slice(start, start + PUBLISH_BATCH_SIZE);
   for (let index = 0; index < batch.length; index += 1) {
@@ -440,11 +458,11 @@ async function sendPreviewBatch(env, chatId, session, offset = 0) {
       });
     } catch (error) {
       const failedOffset = start + index;
-      await sendInline(env, chatId,
-        `تعذر إرسال عنصر المعاينة رقم ${failedOffset + 1} من ${plan.length}.\n` +
+      await editInline(env, chatId, Number(controlMessageId),
+        `⚠️ تعذر إرسال عنصر المعاينة رقم ${failedOffset + 1} من ${plan.length}.\n` +
         `الخطأ: ${String(error?.message || error).slice(0, 500)}\n\n` +
-        "العناصر التي وصلت قبله لم يتم إرسالها مرة أخرى.",
-        [[{ text: "🔁 إعادة محاولة هذا العنصر", callback_data: `preview_send:${failedOffset}` }]],
+        "العناصر التي وصلت قبله موجودة بالفعل ولن نعيد إرسالها. اضغط لإعادة محاولة العنصر الذي فشل.",
+        [[{ text: "🔁 إعادة محاولة العنصر", callback_data: `preview_send:${failedOffset}` }]],
       );
       return;
     }
@@ -452,17 +470,19 @@ async function sendPreviewBatch(env, chatId, session, offset = 0) {
 
   const nextOffset = start + batch.length;
   if (nextOffset < plan.length) {
-    await sendInline(env, chatId,
-      `وصلت ${nextOffset} من ${plan.length} رسالة/ملف في المعاينة. اضغط متابعة لإرسال الجزء التالي.`,
+    await editInline(env, chatId, Number(controlMessageId),
+      `📩 المعاينة الفعلية للأسبوع ${session.week_number}\n\n` +
+      `تم إرسال ${nextOffset} من ${plan.length} رسالة/ملف.\n` +
+      "الملفات والرسائل نفسها وصلت أعلى هذه الرسالة بالترتيب النهائي. اضغط متابعة لإرسال الباقي.",
       [[{ text: "▶️ متابعة المعاينة", callback_data: `preview_send:${nextOffset}` }]],
     );
     return;
   }
 
-  await sendInline(env, chatId,
-    `اكتملت المعاينة التجريبية للأسبوع ${session.week_number} ✅\n` +
-    `تم إرسال ${plan.length} رسالة/ملف في هذه المحادثة فقط.\n\n` +
-    "راجع شكل المحتوى، وبعدها ارجع للمعاينة واضغط «تجهيز النشر» لنشره في القناة.",
+  await editInline(env, chatId, Number(controlMessageId),
+    `✅ اكتملت المعاينة الفعلية للأسبوع ${session.week_number}.\n\n` +
+    `تم إرسال ${plan.length} رسالة/ملف إلى هذه المحادثة بنفس خطة النشر.\n` +
+    "راجع الملفات والرسائل التي وصلتك؛ لم يتم النشر في القناة.",
     [
       [{ text: "🔄 إعادة المعاينة من البداية", callback_data: "preview_send:0" }],
       [{ text: "رجوع للمعاينة", callback_data: "refresh_preview" }],
@@ -869,7 +889,8 @@ async function handleCallback(env, callback) {
   }
   if (data.startsWith("preview_send:")) {
     const offset = Number(data.split(":")[1] || 0);
-    await sendPreviewBatch(env, chatId, active, offset);
+    const controlMessageId = Number(callback.message?.message_id || 0);
+    await sendPreviewBatch(env, chatId, active, offset, controlMessageId);
     return;
   }
   if (data === "prepare_publish") {
