@@ -65,17 +65,34 @@ const ARABIC_ORDINALS = {
   6: "السادس", 7: "السابع", 8: "الثامن", 9: "التاسع", 10: "العاشر",
 };
 
-export function makeSectionsFooter(items) {
-  const knownValues = items.map((item) => item.section_number).filter((value) => value != null);
-  const numbers = [...new Set(knownValues.map(Number))].sort((a, b) => a - b);
-  if (knownValues.length === items.length && numbers.length === 1) {
-    const label = ARABIC_ORDINALS[numbers[0]] || String(numbers[0]);
-    return `☝🏻 سكاشن الأسبوع ${label}`;
-  }
-  if (knownValues.length === items.length && numbers.length > 1) {
-    return `☝🏻 سكاشن الأسابيع ${numbers.join("، ")}`;
-  }
-  return "☝🏻 سكاشن الأسبوع";
+export function formatWeekOrdinal(value) {
+  const numeric = Number(value);
+  if (!Number.isInteger(numeric) || numeric < 1) return "";
+  return ARABIC_ORDINALS[numeric] || String(numeric);
+}
+
+/**
+ * The section-week label is selected manually by the owner.
+ * section_number from filenames is used only for sorting, never for this label.
+ */
+export function makeSectionsFooter(items, sectionsWeekNumber = null) {
+  const label = formatWeekOrdinal(sectionsWeekNumber);
+  return label ? `☝🏻 سكاشن الأسبوع ${label}` : "☝🏻 سكاشن الأسبوع";
+}
+
+export function makeAvailabilityAnnouncement(items, lectureWeekNumber, sectionsWeekNumber = null) {
+  const active = items.filter((item) => !Number(item.ignored));
+  const hasLectures = active.some((item) => item.group_type === "lectures");
+  const hasSections = active.some((item) => item.group_type === "sections");
+  if (!hasLectures && !hasSections) return null;
+
+  const parts = [];
+  const lectureOrdinal = formatWeekOrdinal(lectureWeekNumber);
+  const sectionsOrdinal = formatWeekOrdinal(sectionsWeekNumber);
+  if (hasLectures) parts.push(`محاضرات الأسبوع ${lectureOrdinal || lectureWeekNumber}`);
+  if (hasSections) parts.push(sectionsOrdinal ? `سكاشن الأسبوع ${sectionsOrdinal}` : "سكاشن الأسبوع");
+
+  return `${parts.join(" و")} متوفرة بالكامل على التشانل والبوت (@credit27_bot) ✅ بالتوفيق`;
 }
 
 export const SUMMARIES_FOOTER = "☝🏻 ملخص محاضرة كل مادة الأسبوع ده";
@@ -240,7 +257,7 @@ function compareSummaries(a, b) {
   return aNumber - bNumber || Number(a.received_order) - Number(b.received_order);
 }
 
-export function buildPublishPlan(items, weekNumber) {
+export function buildPublishPlan(items, weekNumber, sectionsWeekNumber = null) {
   const active = items.filter((item) => !Number(item.ignored));
   const plan = [];
   let sequence = 1;
@@ -340,7 +357,7 @@ export function buildPublishPlan(items, weekNumber) {
       sequence: sequence++,
       kind: "text",
       groupType: "sections",
-      text: makeSectionsFooter(sections),
+      text: makeSectionsFooter(sections, sectionsWeekNumber),
       itemId: null,
       addHashtag: false,
       subjectCode: null,
@@ -363,6 +380,21 @@ export function buildPublishPlan(items, weekNumber) {
     });
   }
 
+  const availabilityMessage = makeAvailabilityAnnouncement(active, weekNumber, sectionsWeekNumber);
+  if (availabilityMessage) {
+    const dividerGroup = sections.length ? "sections" : "lectures";
+    pushDivider(dividerGroup);
+    plan.push({
+      sequence: sequence++,
+      kind: "text",
+      groupType: dividerGroup,
+      text: availabilityMessage,
+      itemId: null,
+      addHashtag: false,
+      subjectCode: null,
+    });
+  }
+
   return plan;
 }
 
@@ -378,7 +410,13 @@ export function makeLectureAnnouncement(weekNumber, subjectCode) {
     STUDIES: "دراسات محاسبية",
   };
   const label = labels[subjectCode];
-  return `☝🏻 (${label}) ${weekNumber} محاضرة\n\n${subject.hashtag}`;
+  // Use a natural Arabic word order for the Arabic-only course to avoid
+  // inconsistent bidirectional rendering of parentheses and digits.
+  const firstLine = subjectCode === "STUDIES"
+    ? `☝🏻 محاضرة رقم ${weekNumber} - دراسات محاسبية`
+    : `☝🏻 (${label}) ${weekNumber} محاضرة`;
+  // The hashtag is directly on the next line; there is no blank separator.
+  return `${firstLine}\n${subject.hashtag}`;
 }
 
 export function appendHashtagToText(text = "", hashtag = "") {
@@ -386,7 +424,7 @@ export function appendHashtagToText(text = "", hashtag = "") {
   if (!hashtag) return cleanText;
   const escaped = hashtag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const exists = new RegExp(`(^|\\s)${escaped}(?=$|\\s)`, "m").test(cleanText);
-  return exists ? cleanText : `${cleanText}${cleanText ? "\n\n" : ""}${hashtag}`;
+  return exists ? cleanText : `${cleanText}${cleanText ? "\n" : ""}${hashtag}`;
 }
 
 export function appendHashtagEntity(entities = [], originalText = "", hashtag = "") {
