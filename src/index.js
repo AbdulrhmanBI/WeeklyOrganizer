@@ -7,6 +7,7 @@ import {
   buildPublishPlan,
   appendHashtagEntity,
   normalizeChannelTarget,
+  formatWeekOrdinal,
 } from "./logic.js";
 import { telegramApi, sendMessage, inlineKeyboard } from "./telegram.js";
 
@@ -80,14 +81,7 @@ async function answerCallback(env, callbackId, text = "") {
 async function createWeekSession(env, chatId) {
   const active = await getActiveSession(env);
   if (active) {
-    const statusText = {
-      awaiting_week: "لسه مستني رقم أسبوع المحاضرات للعملية الحالية.",
-      collecting: "فيه أسبوع مفتوح لاستقبال الملفات. أنهِ الاستقبال أو ألغِ العملية الحالية أولًا.",
-      ready: "فيه أسبوع جاهز للمعاينة أو النشر. انشره أو ألغِه قبل بدء أسبوع جديد.",
-      publishing: "فيه عملية نشر جارية. استكمل النشر أو ألغِه قبل بدء أسبوع جديد.",
-      publish_failed: "فيه عملية نشر متوقفة بسبب خطأ. عالجها أو ألغِها قبل بدء أسبوع جديد.",
-    };
-    await reply(env, chatId, statusText[active.status] || "هناك عملية أسبوعية نشطة بالفعل.");
+    await showHome(env, chatId);
     return;
   }
 
@@ -96,12 +90,9 @@ async function createWeekSession(env, chatId) {
      VALUES (?, ?, 'awaiting_week', ?, ?)`,
   ).bind(ownerId(env), String(chatId), nowIso(), nowIso()).run();
 
-  await reply(env, chatId, "نبدأ أسبوعًا جديدًا ✅\n\nاكتب رقم أسبوع المحاضرات، مثل 6. رقم أسبوع السكاشن هتحدده لاحقًا وقت تصنيف أول ملف كسكشن.", {
-    reply_markup: {
-      ...MAIN_KEYBOARD,
-      input_field_placeholder: "رقم أسبوع المحاضرات، مثال: 6",
-    },
-  });
+  await reply(env, chatId,
+    "تم إنشاء أسبوع جديد.\nأرسل رقم أسبوع المحاضرات من 1 إلى 99.\nستحدد رقم أسبوع التمارين العملية لاحقًا عند تصنيف أول ملف في هذا القسم.",
+  );
 }
 
 function getMessageSource(message) {
@@ -181,18 +172,103 @@ async function handleIncomingContent(env, session, message) {
   if (saved.duplicateUpdate) return;
   if (saved.total === 1 || saved.total % 5 === 0) {
     const text = saved.needsReview
-      ? `استلمت ${saved.total} عناصر حتى الآن.\n\n⚠️ فيه عنصر محتاج تحديد المادة من زر «تصحيح التصنيف».`
-      : `تم استلام المحتوى ✅\nعدد العناصر المستلمة: ${saved.total}`;
+      ? `تم استلام ${saved.total} عناصر. يوجد ملف يحتاج إلى مراجعة تصنيفه.`
+      : `تم استلام المحتوى بنجاح.\nعدد العناصر: ${saved.total}`;
     await reply(env, message.chat.id, text);
   }
 }
 
 async function showWelcome(env, chatId) {
-  await reply(
-    env,
-    chatId,
-    "أهلًا بك في Weekly Telegram Organizer 📚\n\nابعت ملفات الأسبوع عن طريق Forward بعد الضغط على «أسبوع جديد». بعد إنهاء الاستقبال اضغط «معاينة الترتيب» لإرسال كل المحتوى مرتبًا في الشات. نشر المحتوى في القناة اختياري.\n\nاستخدم الأزرار الموجودة أسفل المحادثة للتحكم.",
-  );
+  await reply(env, chatId, "مرحبًا بك في منظّم المحتوى الأسبوعي 📚\nيمكنك إدارة أسبوعك من القائمة التالية.");
+  // Keep /start responsive even when D1 is temporarily unavailable.
+  if (!env.DB) return;
+  try {
+    await showHome(env, chatId);
+  } catch (error) {
+    console.error("Could not load the home screen after /start:", error?.stack || error);
+    await sendInline(env, chatId,
+      "تعذر تحميل حالة الأسبوع حاليًا. تحقق من اتصال قاعدة البيانات ثم اضغط «الرئيسية» مرة أخرى.",
+      [[{ text: "تحديث القائمة", callback_data: "home" }]],
+    );
+  }
+}
+
+/**
+ * A single contextual home screen replaces the old eight-button keyboard.
+ * The user only sees the actions that make sense for the current state.
+ */
+async function showHome(env, chatId) {
+  const session = await getActiveSession(env);
+
+  if (!session) {
+    const latest = await getLatestSession(env);
+    const previous = latest
+      ? `\nآخر عملية: الأسبوع ${latest.week_number ?? "غير محدد"} — ${latest.status === "completed" ? "مكتملة" : latest.status === "cancelled" ? "ملغاة" : latest.status}.`
+      : "";
+    await sendInline(env, chatId,
+      `القائمة الرئيسية\n\nابدأ أسبوعًا جديدًا، ثم أرسل الملفات. بعد انتهاء الاستقبال يمكنك إرسال المحتوى كاملًا إلى هذه المحادثة. النشر في القناة اختياري.${previous}`,
+      [[{ text: "➕ بدء أسبوع جديد", callback_data: "start_week" }]],
+    );
+    return;
+  }
+
+  if (session.status === "awaiting_week") {
+    await sendInline(env, chatId,
+      "الأسبوع الجديد قيد الإعداد. أرسل رقم أسبوع المحاضرات من 1 إلى 99.",
+      [[{ text: "إلغاء الأسبوع", callback_data: "cancel_session" }]],
+    );
+    return;
+  }
+
+  if (session.awaiting_sections_week) {
+    const rows = [];
+    if (Number(session.sections_week_number) && Number(session.pending_section_item_id)) {
+      rows.push([{ text: `استخدام أسبوع التمارين الحالي (${session.sections_week_number})`, callback_data: `use_sections_week:${session.pending_section_item_id}` }]);
+    }
+    rows.push([{ text: "إلغاء تصنيف هذا الملف", callback_data: "cancel_section_week_input" }]);
+    await sendInline(env, chatId,
+      `بانتظار رقم أسبوع التمارين العملية من 1 إلى 99.${session.pending_section_item_id ? "\nأرسل الرقم في المحادثة، أو استخدم الرقم المحفوظ." : ""}`,
+      rows,
+    );
+    return;
+  }
+
+  if (session.status === "collecting") {
+    const items = await getItems(env, session.id);
+    const activeItems = items.filter((item) => !Number(item.ignored));
+    const needsReview = activeItems.filter((item) => !item.subject_code || item.classification_status === "review").length;
+    const lines = [
+      `استقبال الأسبوع ${formatWeekOrdinal(session.week_number) || session.week_number}`,
+      `تم استلام ${activeItems.length} عنصر حتى الآن.`,
+      needsReview ? `يوجد ${needsReview} عنصر يحتاج إلى مراجعة التصنيف.` : "التصنيفات الحالية سليمة.",
+      "يمكنك متابعة إرسال الملفات، ثم إنهاء الاستقبال عند الانتهاء.",
+    ];
+    const rows = [[{ text: "إنهاء استقبال الملفات", callback_data: "finish_receiving" }]];
+    if (needsReview) rows.push([{ text: "مراجعة الملفات غير المصنفة", callback_data: "listc:0" }]);
+    rows.push([{ text: "إلغاء الأسبوع", callback_data: "cancel_session" }]);
+    await sendInline(env, chatId, lines.join("\n\n"), rows);
+    return;
+  }
+
+  if (session.status === "ready") {
+    await showPreview(env, chatId, session);
+    return;
+  }
+
+  if (session.status === "publishing") {
+    await sendInline(env, chatId,
+      `يجري نشر الأسبوع ${formatWeekOrdinal(session.week_number) || session.week_number} في القناة. يمكنك متابعة النشر عند الحاجة.`,
+      [[{ text: "متابعة النشر", callback_data: "continue_publish" }], [{ text: "عرض الحالة", callback_data: "show_status" }]],
+    );
+    return;
+  }
+
+  if (session.status === "publish_failed") {
+    await resumeFailedPublish(env, chatId, session);
+    return;
+  }
+
+  await sendInline(env, chatId, `حالة الأسبوع: ${session.status}`, [[{ text: "تحديث القائمة", callback_data: "home" }]]);
 }
 
 async function handleMessage(env, message) {
@@ -208,6 +284,11 @@ async function handleMessage(env, message) {
 
   const active = await getActiveSession(env);
 
+  if (text === MAIN_BUTTONS.home || text === "القائمة الرئيسية" || text === "/menu") {
+    await showHome(env, chatId);
+    return;
+  }
+  // Backward compatibility for messages generated by older reply keyboards.
   if (text === MAIN_BUTTONS.newWeek) {
     await createWeekSession(env, chatId);
     return;
@@ -245,7 +326,7 @@ async function handleMessage(env, message) {
     const destination = normalizeChannelTarget(text);
     if (!destination) {
       await reply(env, chatId,
-        "صيغة وجهة النشر غير صحيحة. ابعت @ChannelUsername أو Chat ID رقمي يبدأ عادةً بـ -100 أو رابط t.me لقناة عامة.",
+        "صيغة وجهة النشر غير صحيحة. أرسل @ChannelUsername أو رقم Chat ID يبدأ عادةً بـ -100 أو رابط t.me للقناة العامة.",
       );
       return;
     }
@@ -253,19 +334,19 @@ async function handleMessage(env, message) {
       `UPDATE sessions SET target_chat_id = ?, awaiting_destination = 0, updated_at = ? WHERE id = ?`,
     ).bind(destination, nowIso(), active.id).run();
     const updatedSession = { ...active, target_chat_id: destination, awaiting_destination: 0 };
-    await reply(env, chatId, `تم حفظ وجهة النشر: ${destination} ✅\nهجهز المعاينة النهائية الآن.`);
+    await reply(env, chatId, `تم حفظ وجهة النشر: ${destination} ✅\nيجري الآن إعداد خطة النشر.`);
     await startPublishConfirmation(env, chatId, updatedSession);
     return;
   }
 
   if (active?.awaiting_sections_week) {
     if (!/^\d{1,2}$/.test(text)) {
-      await reply(env, chatId, "اكتب رقم أسبوع السكاشن كرقم صحيح من 1 إلى 99.");
+      await reply(env, chatId, "أرسل رقم أسبوع التمارين العملية كعدد صحيح من 1 إلى 99.");
       return;
     }
     const sectionsWeek = Number(text);
     if (sectionsWeek < 1 || sectionsWeek > 99) {
-      await reply(env, chatId, "رقم أسبوع السكاشن لازم يكون بين 1 و99.");
+      await reply(env, chatId, "يجب أن يكون رقم أسبوع التمارين العملية بين 1 و99.");
       return;
     }
     const pendingItemId = Number(active.pending_section_item_id || 0);
@@ -276,34 +357,39 @@ async function handleMessage(env, message) {
     if (pendingItemId) {
       const pendingItem = await getItem(env, active.id, pendingItemId);
       if (!pendingItem || Number(pendingItem.ignored)) {
-        await reply(env, chatId, "تم حفظ رقم أسبوع السكاشن، لكن الملف المطلوب تصنيفه لم يعد متاحًا. افتح تصحيح التصنيف واختره مرة أخرى.");
+        await reply(env, chatId, "حُفظ رقم أسبوع التمارين العملية، لكن الملف المطلوب لم يعد متاحًا. افتح مراجعة التصنيف واختر الملف مرة أخرى.");
         return;
       }
-      await reply(env, chatId, `تم حفظ رقم أسبوع السكاشن: ${sectionsWeek} ✅`);
+      await reply(env, chatId, `تم حفظ رقم أسبوع التمارين العملية: ${formatWeekOrdinal(sectionsWeek)} ✅`);
       await showSubjectPicker(env, chatId, pendingItem, "sections", sectionsWeek);
       return;
     }
 
-    await reply(env, chatId, `تم حفظ رقم أسبوع السكاشن: ${sectionsWeek} ✅`);
+    await reply(env, chatId, `تم حفظ رقم أسبوع التمارين العملية: ${formatWeekOrdinal(sectionsWeek)} ✅`);
     await finishReceiving(env, chatId, { ...active, sections_week_number: sectionsWeek, awaiting_sections_week: 0 });
     return;
   }
 
   if (active?.status === "awaiting_week") {
     if (!/^\d{1,3}$/.test(text)) {
-      await reply(env, chatId, "من فضلك اكتب رقم أسبوع المحاضرات كرقم صحيح، مثل 6.");
+      await reply(env, chatId, "أرسل رقم أسبوع المحاضرات كعدد صحيح من 1 إلى 99، مثل 6.");
       return;
     }
     const week = Number(text);
     if (week < 1 || week > 99) {
-      await reply(env, chatId, "رقم الأسبوع لازم يكون بين 1 و99.");
+      await reply(env, chatId, "يجب أن يكون رقم الأسبوع بين 1 و99.");
       return;
     }
     await env.DB.prepare(
       `UPDATE sessions SET week_number = ?, status = 'collecting', awaiting_sections_week = 0, updated_at = ? WHERE id = ?`,
     ).bind(week, nowIso(), active.id).run();
-    await reply(env, chatId,
-      `تم تحديد أسبوع المحاضرات: ${week} ✅\n\nابعت الملفات والرسائل عن طريق Forward بأي ترتيب.\nرقم أسبوع السكاشن هتدخله لما تختار تصنيف أحد الملفات على إنه «سكاشن».\n\nلما تخلص اضغط «إنهاء الاستقبال».`);
+    await sendInline(env, chatId,
+      `بدأ استقبال محتوى الأسبوع ${formatWeekOrdinal(week)} ✅\n\nأرسل جميع الملفات والرسائل بأي ترتيب؛ سأرتبها تلقائيًا.\nعند الانتهاء، اضغط «إنهاء استقبال الملفات».`,
+      [
+        [{ text: "إنهاء استقبال الملفات", callback_data: "finish_receiving" }],
+        [{ text: "عرض حالة الأسبوع", callback_data: "show_status" }],
+      ],
+    );
     return;
   }
 
@@ -313,18 +399,18 @@ async function handleMessage(env, message) {
   }
 
   if (message.document || message.audio || message.voice || message.video || message.animation || message.photo || message.text || message.caption) {
-    await reply(env, chatId, "مفيش أسبوع مفتوح حاليًا. اضغط «أسبوع جديد» الأول، وبعدها ابعت الملفات.");
+    await reply(env, chatId, "لا يوجد أسبوع مفتوح حاليًا. ابدأ أسبوعًا جديدًا من القائمة الرئيسية قبل إرسال الملفات.");
     return;
   }
 }
 
 async function finishReceiving(env, chatId, session) {
   if (session?.awaiting_sections_week) {
-    await reply(env, chatId, "فيه تصنيف سكشن مستني رقم أسبوع السكاشن. اكتب رقمًا من 1 إلى 99 في المحادثة أولًا.");
+    await reply(env, chatId, "يوجد ملف قيد تصنيف التمارين العملية. أرسل رقم الأسبوع من 1 إلى 99 أولًا.");
     return;
   }
   if (!session) {
-    await reply(env, chatId, "مفيش أسبوع مفتوح لإنهاء استقباله. اضغط «أسبوع جديد».");
+    await showHome(env, chatId);
     return;
   }
   if (session.status !== "collecting") {
@@ -334,7 +420,7 @@ async function finishReceiving(env, chatId, session) {
 
   const items = await getItems(env, session.id);
   if (!items.length) {
-    await reply(env, chatId, "لسه ما استلمتش أي ملفات أو رسائل. ابعت المحتوى الأول، أو ألغِ العملية.");
+    await reply(env, chatId, "لم يُستلم أي ملف بعد. أرسل الملفات أولًا، ثم أنهِ الاستقبال.");
     return;
   }
 
@@ -344,7 +430,7 @@ async function finishReceiving(env, chatId, session) {
       `UPDATE sessions SET awaiting_sections_week = 1, pending_section_item_id = NULL, updated_at = ? WHERE id = ?`,
     ).bind(nowIso(), session.id).run();
     await sendInline(env, chatId,
-      "فيه ملفات مصنفة كسكاشن، لكن رقم أسبوع السكاشن لسه مش متحدد.\n\nاكتب رقم الأسبوع من 1 إلى 99.\nرقم Sec الموجود في اسم الملف لترتيب السكاشن فقط، ومش هو رقم الأسبوع.",
+      "تم تصنيف ملفات ضمن التمارين العملية، لكن رقم أسبوعها غير محدد.\n\nأرسل رقم أسبوع التمارين العملية من 1 إلى 99.\nرقم Sec في اسم الملف مخصص لترتيب الملفات فقط، ولا يحدد رقم الأسبوع.",
       [],
     );
     return;
@@ -384,11 +470,11 @@ function formatCounts(items, groupType) {
 
 async function showPreview(env, chatId, session) {
   if (!session) {
-    await reply(env, chatId, "مفيش عملية أسبوعية حاليًا. اضغط «أسبوع جديد».");
+    await showHome(env, chatId);
     return;
   }
   if (session.status === "awaiting_week") {
-    await reply(env, chatId, "لسه محتاج تدخل رقم الأسبوع الأول.");
+    await sendInline(env, chatId, "أرسل رقم أسبوع المحاضرات أولًا.", [[{ text: "إلغاء الأسبوع", callback_data: "cancel_session" }]]);
     return;
   }
 
@@ -403,40 +489,52 @@ async function showPreview(env, chatId, session) {
     seen.add(item.file_unique_id);
   }
 
-  const sections = ["lectures", "sections", "summaries"].map((group) => {
+  const groups = ["lectures", "sections", "summaries"].map((group) => {
     const result = formatCounts(activeItems, group);
-    return `${group === "lectures" ? "📚" : group === "sections" ? "📝" : "📌"} ${groupName(group)}: ${result.total}\n${result.lines.join("\n") || "  • لا توجد ملفات"}`;
+    const icon = group === "lectures" ? "📚" : group === "sections" ? "📝" : "📌";
+    return `${icon} ${groupName(group)}: ${result.total}`;
   });
 
-  let preview = `معاينة المحاضرات: الأسبوع ${session.week_number}${session.sections_week_number ? `\nمعاينة السكاشن: الأسبوع ${session.sections_week_number}` : ""} ✅\n\n${sections.join("\n\n")}\n\n`;
-  preview += `📦 إجمالي العناصر: ${activeItems.length}\n`;
-  preview += `⚠️ عناصر تحتاج مراجعة: ${reviewItems.length}\n`;
-  preview += `🔁 ملفات مكررة محتملة: ${duplicates.size}\n`;
-  preview += `🗑 عناصر تم تجاهلها: ${items.length - activeItems.length}`;
+  const lectureWeek = formatWeekOrdinal(session.week_number) || session.week_number;
+  const sectionsWeek = formatWeekOrdinal(session.sections_week_number) || session.sections_week_number;
+  let preview = `ملخص الأسبوع ${lectureWeek} ✅\n`;
+  if (activeItems.some((item) => item.group_type === "sections")) {
+    preview += `أسبوع التمارين العملية: ${sectionsWeek || "لم يُحدد"}\n`;
+  }
+  preview += `\n${groups.join("\n")}\n\n`;
+  preview += `إجمالي العناصر: ${activeItems.length}\n`;
+  preview += `تحتاج إلى مراجعة: ${reviewItems.length}\n`;
+  preview += `ملفات مكررة محتملة: ${duplicates.size}\n`;
+  preview += `عناصر مستبعدة: ${items.length - activeItems.length}`;
 
   const buttons = [];
   if (reviewItems.length) {
-    buttons.push([{ text: "🛠 تصحيح العناصر غير المصنفة", callback_data: "listc:0" }]);
+    buttons.push([{ text: `مراجعة التصنيف (${reviewItems.length})`, callback_data: "listc:0" }]);
   }
-  if (["ready", "completed"].includes(session.status) && !reviewItems.length) {
-    buttons.push([{ text: "📨 إرسال المحتوى كاملًا في الشات", callback_data: "preview_send:0" }]);
-    if (session.status === "ready") {
-      buttons.push([{ text: "🚀 نشر نسخة في القناة (اختياري)", callback_data: "prepare_publish" }]);
+  if (activeItems.length && ["ready", "completed"].includes(session.status)) {
+    if (!reviewItems.length) {
+      buttons.push([{ text: "📨 إرسال المحتوى كاملًا إلى هذه المحادثة", callback_data: "preview_send:0" }]);
     }
+    if (session.status === "ready" && !reviewItems.length) {
+      buttons.push([{ text: "📢 النشر في القناة (اختياري)", callback_data: "prepare_publish" }]);
+    }
+    buttons.push([
+      { text: "تصحيح ملف", callback_data: "listc:0" },
+      { text: "استبعاد ملف", callback_data: "listi:0" },
+    ]);
   }
-  buttons.push([{ text: "🔄 تحديث المعاينة", callback_data: "refresh_preview" }]);
+  if (session.status === "collecting") {
+    buttons.push([{ text: "إنهاء استقبال الملفات", callback_data: "finish_receiving" }]);
+    if (reviewItems.length) buttons.push([{ text: `مراجعة التصنيف (${reviewItems.length})`, callback_data: "listc:0" }]);
+  }
+  buttons.push([{ text: "🏠 الرئيسية", callback_data: "home" }]);
 
   await sendInline(env, chatId, preview.slice(0, 3900), buttons);
-  await reply(env, chatId, session.status === "collecting"
-    ? "الاستقبال ما زال مفتوحًا. تقدر تكمل إرسال الملفات، وبعدها اضغط «إنهاء الاستقبال»."
-    : session.status === "ready"
-      ? (reviewItems.length ? "راجع العناصر غير المصنفة قبل النشر." : "المحتوى جاهز. اضغط «معاينة الترتيب» لإرسال كل الملفات هنا، والنشر في القناة اختياري.")
-      : `حالة العملية: ${session.status}`);
 }
 
 async function sendFullPreview(env, chatId, session, offset = 0) {
   if (!session || !["ready", "completed"].includes(session.status)) {
-    await reply(env, chatId, "أنهِي استقبال الملفات أولًا، وبعدها اضغط «معاينة الترتيب» لإرسال المحتوى كاملًا إلى الشات.");
+    await reply(env, chatId, "أنهِي استقبال الملفات أولًا، ثم اختر إرسال المحتوى كاملًا إلى هذه المحادثة.");
     return;
   }
 
@@ -523,13 +621,15 @@ async function showStatus(env, chatId, session) {
     publishText = `\n📤 تقدم النشر: ${progress?.done || 0}/${progress?.total || 0}\n❌ عناصر بها خطأ: ${progress?.failed || 0}`;
   }
 
-  await reply(env, chatId,
-    `أسبوع المحاضرات: ${session.week_number ?? "بانتظار الرقم"}\nأسبوع السكاشن: ${session.sections_week_number ?? "غير محدد"}\nالحالة: ${session.status}\n📦 العناصر المستلمة: ${count?.total || 0}\n✅ العناصر النشطة: ${count?.active || 0}\n⚠️ تحتاج مراجعة: ${count?.review || 0}${publishText}`);
+  await sendInline(env, chatId,
+    `أسبوع المحاضرات: ${formatWeekOrdinal(session.week_number) || "بانتظار الرقم"}\nأسبوع التمارين العملية: ${formatWeekOrdinal(session.sections_week_number) || "غير محدد"}\nالحالة: ${session.status}\nالعناصر المستلمة: ${count?.total || 0}\nالعناصر النشطة: ${count?.active || 0}\nتحتاج مراجعة: ${count?.review || 0}${publishText}`,
+    [[{ text: "🏠 الرئيسية", callback_data: "home" }]],
+  );
 }
 
 async function showItemPicker(env, chatId, session, mode, page) {
   if (!session || !["collecting", "ready"].includes(session.status)) {
-    await reply(env, chatId, "يمكن تصحيح التصنيف أو تجاهل العناصر أثناء استقبال المحتوى أو بعد إنهائه وقبل النشر.");
+    await reply(env, chatId, "يمكنك مراجعة التصنيف أو استبعاد الملفات أثناء الاستقبال أو بعد إنهائه وقبل النشر.");
     return;
   }
   const items = await getItems(env, session.id);
@@ -539,11 +639,11 @@ async function showItemPicker(env, chatId, session, mode, page) {
   const pageItems = available.slice(safePage * ITEM_PAGE_SIZE, (safePage + 1) * ITEM_PAGE_SIZE);
 
   if (!pageItems.length) {
-    await reply(env, chatId, mode === "classify" ? "مفيش عناصر متاحة لتصحيحها." : "مفيش عناصر متاحة لتجاهلها.");
+    await reply(env, chatId, mode === "classify" ? "لا توجد ملفات متاحة لمراجعة تصنيفها." : "لا توجد ملفات متاحة للاستبعاد.");
     return;
   }
 
-  const title = mode === "classify" ? "اختر الملف أو الرسالة التي تريد تصحيح تصنيفها:" : "اختر العنصر الذي تريد تجاهله:";
+  const title = mode === "classify" ? "اختر الملف الذي تريد مراجعة تصنيفه:" : "اختر الملف الذي تريد استبعاده:";
   const rows = pageItems.map((item) => [{
     text: `${item.id}. ${String(item.display_name).slice(0, 42)}${item.subject_code ? ` · ${item.subject_code}` : " · غير مصنف"}`.slice(0, 60),
     callback_data: `${mode === "classify" ? "ci" : "ii"}:${item.id}`,
@@ -552,7 +652,7 @@ async function showItemPicker(env, chatId, session, mode, page) {
   if (safePage > 0) nav.push({ text: "⬅️ السابق", callback_data: `${mode === "classify" ? "listc" : "listi"}:${safePage - 1}` });
   if (safePage < pages - 1) nav.push({ text: "التالي ➡️", callback_data: `${mode === "classify" ? "listc" : "listi"}:${safePage + 1}` });
   if (nav.length) rows.push(nav);
-  rows.push([{ text: "رجوع للوحة التحكم", callback_data: "menu" }]);
+  rows.push([{ text: "🏠 الرئيسية", callback_data: "home" }]);
   await sendInline(env, chatId, `${title}\nصفحة ${safePage + 1} من ${pages}`, rows);
 }
 
@@ -571,7 +671,7 @@ async function cancelCurrentSession(env, chatId, session) {
   await env.DB.prepare(
     `UPDATE sessions SET status = 'cancelled', updated_at = ? WHERE id = ?`,
   ).bind(nowIso(), session.id).run();
-  await reply(env, chatId, `تم إلغاء عملية الأسبوع ${session.week_number ?? "الجديد"}. تقدر تبدأ عملية جديدة في أي وقت.`);
+  await reply(env, chatId, `أُلغيت عملية الأسبوع ${formatWeekOrdinal(session.week_number) || session.week_number || "الجديد"}. يمكنك بدء أسبوع جديد من القائمة الرئيسية.`);
 }
 
 function getPublishDestination(env, session) {
@@ -582,7 +682,7 @@ function getPublishDestination(env, session) {
 
 async function startPublishConfirmation(env, chatId, session) {
   if (!session) {
-    await reply(env, chatId, "مفيش محتوى جاهز للنشر. ابدأ أسبوعًا جديدًا أولًا.");
+    await reply(env, chatId, "لا يوجد محتوى جاهز للنشر. ابدأ أسبوعًا جديدًا أولًا.");
     return;
   }
   if (session.status === "publishing") {
@@ -614,7 +714,7 @@ async function startPublishConfirmation(env, chatId, session) {
       `UPDATE sessions SET awaiting_destination = 1, updated_at = ? WHERE id = ?`,
     ).bind(nowIso(), session.id).run();
     await reply(env, chatId,
-      "معرف القناة غير محدد في إعدادات المشروع، وده اختياري ✅\n\nابعت الآن وجهة النشر بإحدى الطرق التالية:\n• @ChannelUsername للقناة العامة\n• -1001234567890 للقناة الخاصة\n• رابط t.me للقناة العامة\n\nلازم تضيف البوت للقناة كمسؤول وتمنحه صلاحية نشر الرسائل. تقدر تلغي العملية من زر «إلغاء العملية».",
+      "لم تُحدد وجهة النشر بعد. أرسل أحد الخيارات التالية:\n• @ChannelUsername للقناة العامة\n• -1001234567890 للقناة الخاصة\n• رابط t.me للقناة العامة\n\nتأكد من إضافة البوت إلى القناة ومنحه صلاحية نشر الرسائل. النشر اختياري، ويمكنك العودة إلى القائمة الرئيسية.",
     );
     return;
   }
@@ -645,7 +745,7 @@ async function startPublishConfirmation(env, chatId, session) {
 
   const planCount = plan.length;
   await sendInline(env, chatId,
-    `تم تجهيز خطة النشر للأسبوع ${session.week_number} ✅\n\nوجهة النشر: ${getPublishDestination(env, session)}\nعدد الرسائل والمنشورات: ${planCount}\nسيتم النشر بالترتيب: المحاضرات، ثم السكاشن، ثم الملخصات.\n\nهل تؤكد النشر؟`,
+    `تم تجهيز خطة النشر للأسبوع ${session.week_number} ✅\n\nوجهة النشر: ${getPublishDestination(env, session)}\nعدد الرسائل والمنشورات: ${planCount}\nسيتم النشر بالترتيب: المحاضرات، ثم التمارين العملية، ثم الملخصات.\n\nهل تؤكد النشر؟`,
     [[{ text: "✅ تأكيد النشر", callback_data: "publish_yes" }], [{ text: "إلغاء والعودة", callback_data: "publish_no" }]],
   );
 }
@@ -966,7 +1066,7 @@ async function sendPublishProgress(env, chatId, sessionId) {
 
   if (done >= total && total > 0) {
     await env.DB.prepare(`UPDATE sessions SET status = 'completed', updated_at = ? WHERE id = ?`).bind(nowIso(), sessionId).run();
-    await reply(env, chatId, `اكتمل نشر الأسبوع ✅\n\nتم نشر ${done} من ${total} رسالة/منشور في القناة.\nتقدر تبدأ أسبوعًا جديدًا من الزر الموجود بالأسفل.`);
+    await reply(env, chatId, `اكتمل نشر الأسبوع ✅\n\nتم نشر ${done} من ${total} رسالة أو منشور في القناة. يمكنك بدء أسبوع جديد من القائمة الرئيسية.`);
     return;
   }
 
@@ -987,20 +1087,20 @@ async function sendPublishProgress(env, chatId, sessionId) {
 
   await env.DB.prepare(`UPDATE sessions SET status = 'publishing', updated_at = ? WHERE id = ?`).bind(nowIso(), sessionId).run();
   await sendInline(env, chatId,
-    `جارٍ نشر الأسبوع.\n\n✅ تم: ${done}/${total}\n⏳ متبقٍ: ${pending}\n\nاضغط متابعة لاستكمال الدفعة التالية.`,
+    `جارٍ نشر الأسبوع.\n\nتم: ${done}/${total}\nالمتبقي: ${pending}\n\nاضغط «متابعة النشر» لاستكمال الدفعة التالية.`,
     [[{ text: "▶️ متابعة النشر", callback_data: "continue_publish" }]],
   );
 }
 
 async function publishNextBatch(env, chatId, session) {
   if (!session) {
-    await reply(env, chatId, "لا توجد عملية نشر حالية.");
+    await reply(env, chatId, "لا توجد عملية نشر جارية.");
     return;
   }
 
   const destinationChatId = getPublishDestination(env, session);
   if (!destinationChatId) {
-    await reply(env, chatId, "وجهة النشر غير محددة. اضغط «نشر المحتوى» وحدد القناة أولًا.");
+    await reply(env, chatId, "لم تُحدد وجهة النشر بعد. افتح خيار النشر في القناة لتحديدها.");
     return;
   }
 
@@ -1064,9 +1164,9 @@ async function showSubjectPicker(env, chatId, item, groupType, sectionsWeekNumbe
   let prompt = `اختر المادة الصحيحة للعنصر:\n${item.display_name}`;
   if (groupType === "sections") {
     prompt += sectionsWeekNumber
-      ? `\n\nأسبوع السكاشن المحدد: ${sectionsWeekNumber}`
-      : "\n\nلم يتم تحديد رقم أسبوع السكاشن بعد.";
-    buttons.push([{ text: "✏️ تغيير رقم أسبوع السكاشن", callback_data: `sw:${item.id}` }]);
+      ? `\n\nأسبوع التمارين العملية: ${formatWeekOrdinal(sectionsWeekNumber) || sectionsWeekNumber}`
+      : "\n\nلم يُحدد أسبوع التمارين العملية بعد.";
+    buttons.push([{ text: "تغيير أسبوع التمارين العملية", callback_data: `sw:${item.id}` }]);
   }
   await sendInline(env, chatId, prompt, buttons);
 }
@@ -1087,27 +1187,30 @@ async function handleCallback(env, callback) {
     const itemId = Number(data.split(":")[1]);
     const item = await getItem(env, active.id, itemId);
     if (!item || Number(item.ignored)) {
-      await reply(env, chatId, "ملف السكشن غير موجود أو تم تجاهله.");
+      await reply(env, chatId, "ملف التمارين العملية غير موجود أو تم استبعاده.");
       return;
     }
     await env.DB.prepare(
       `UPDATE sessions SET awaiting_sections_week = 1, pending_section_item_id = ?, updated_at = ? WHERE id = ?`,
     ).bind(itemId, nowIso(), active.id).run();
     await sendInline(env, chatId,
-      `اكتب رقم أسبوع السكاشن للملف ده (من 1 إلى 99):\n${item.display_name}\n\nرقم Sec الموجود في اسم الملف لترتيب الملفات فقط.`,
-      [],
+      `أرسل رقم أسبوع التمارين العملية لهذا الملف (من 1 إلى 99):\n${item.display_name}\n\nرقم Sec في اسم الملف مخصص لترتيب الملفات فقط.`,
+      [
+        ...(Number(active.sections_week_number) ? [[{ text: `الإبقاء على الأسبوع ${formatWeekOrdinal(active.sections_week_number)}`, callback_data: `use_sections_week:${itemId}` }]] : []),
+        [{ text: "إلغاء التصنيف", callback_data: "cancel_section_week_input" }],
+      ],
     );
     return;
   }
 
   if (data.startsWith("use_sections_week:")) {
     if (!active || !Number(active.awaiting_sections_week) || !Number(active.sections_week_number)) {
-      await reply(env, chatId, "مفيش رقم أسبوع سكاشن محفوظ لاستخدامه. اكتب رقم الأسبوع في المحادثة.");
+      await reply(env, chatId, "لا يوجد رقم أسبوع محفوظ. أرسل رقم أسبوع التمارين العملية في المحادثة.");
       return;
     }
     const itemId = Number(data.split(":")[1]);
     if (Number(active.pending_section_item_id) !== itemId) {
-      await reply(env, chatId, "طلب تحديد أسبوع السكاشن اتغير. اختار تصنيف الملف مرة تانية.");
+      await reply(env, chatId, "تغير الملف قيد التصنيف. افتح مراجعة التصنيف واختر الملف مرة أخرى.");
       return;
     }
     await env.DB.prepare(
@@ -1115,15 +1218,43 @@ async function handleCallback(env, callback) {
     ).bind(nowIso(), active.id).run();
     const item = await getItem(env, active.id, itemId);
     if (!item || Number(item.ignored)) {
-      await reply(env, chatId, "ملف السكشن غير موجود أو تم تجاهله.");
+      await reply(env, chatId, "ملف التمارين العملية غير موجود أو تم استبعاده.");
       return;
     }
     await showSubjectPicker(env, chatId, item, "sections", active.sections_week_number);
     return;
   }
 
-  if (data === "menu") {
-    await reply(env, chatId, "استخدم أزرار لوحة التحكم.");
+  if (data === "home" || data === "menu") {
+    await showHome(env, chatId);
+    return;
+  }
+  if (data === "start_week") {
+    await createWeekSession(env, chatId);
+    return;
+  }
+  if (data === "finish_receiving") {
+    await finishReceiving(env, chatId, active);
+    return;
+  }
+  if (data === "show_status") {
+    await showStatus(env, chatId, active);
+    return;
+  }
+  if (data === "cancel_session") {
+    await cancelCurrentSession(env, chatId, active);
+    return;
+  }
+  if (data === "cancel_section_week_input") {
+    if (active && Number(active.awaiting_sections_week)) {
+      await env.DB.prepare(
+        `UPDATE sessions SET awaiting_sections_week = 0, pending_section_item_id = NULL, updated_at = ? WHERE id = ?`,
+      ).bind(nowIso(), active.id).run();
+      const message = Number(active.sections_week_number)
+        ? "أُلغي تغيير أسبوع التمارين العملية، وظل الأسبوع السابق محفوظًا."
+        : "أُلغي تصنيف الملف، ولم يُحفظ رقم أسبوع للتمارين العملية.";
+      await sendInline(env, chatId, message, [[{ text: "مراجعة التصنيف", callback_data: "listc:0" }], [{ text: "🏠 الرئيسية", callback_data: "home" }]]);
+    }
     return;
   }
   if (data === "refresh_preview") {
@@ -1141,7 +1272,7 @@ async function handleCallback(env, callback) {
   }
   if (data === "publish_yes") {
     if (!active || active.status !== "ready") {
-      await reply(env, chatId, "لم تعد هناك عملية جاهزة للتأكيد. حدّث المعاينة أولًا.");
+      await reply(env, chatId, "لم تعد هناك عملية جاهزة للتأكيد. افتح ملخص الأسبوع أولًا.");
       return;
     }
     await env.DB.prepare(`UPDATE sessions SET status = 'publishing', updated_at = ? WHERE id = ?`).bind(nowIso(), active.id).run();
@@ -1176,7 +1307,7 @@ async function handleCallback(env, callback) {
     }
     const groupRows = [
       [{ text: "📚 المحاضرات", callback_data: `cg:${id}:lectures` }],
-      [{ text: "📝 السكاشن", callback_data: `cg:${id}:sections` }],
+      [{ text: "📝 التمارين العملية", callback_data: `cg:${id}:sections` }],
       [{ text: "📌 الملخصات", callback_data: `cg:${id}:summaries` }],
     ];
     await sendInline(env, chatId, `تصحيح العنصر:\n${item.display_name}\n\nاختر القسم الصحيح:`, groupRows);
@@ -1189,18 +1320,13 @@ async function handleCallback(env, callback) {
     const item = await getItem(env, active.id, id);
     if (!item || Number(item.ignored)) return;
 
-    if (groupType === "sections") {
-      // Always ask at the point where the owner classifies an item as a section.
-      // This remains visible even when an older session already has a saved value.
+    if (groupType === "sections" && !Number(active.sections_week_number)) {
       await env.DB.prepare(
         `UPDATE sessions SET awaiting_sections_week = 1, pending_section_item_id = ?, updated_at = ? WHERE id = ?`,
       ).bind(id, nowIso(), active.id).run();
-      const useCurrentRows = Number(active.sections_week_number)
-        ? [[{ text: `✅ استخدم أسبوع السكاشن الحالي (${active.sections_week_number})`, callback_data: `use_sections_week:${id}` }]]
-        : [];
       await sendInline(env, chatId,
-        `أنت بتصنّف الملف ده كسكشن:\n${item.display_name}\n\nاكتب رقم أسبوع السكاشن الذي ينتمي إليه الملف (من 1 إلى 99).\n\nملحوظة: رقم Sec الموجود في اسم الملف لترتيب السكاشن فقط، أما رقم الأسبوع فأنت اللي بتحدده هنا.`,
-        useCurrentRows,
+        `هذا الملف من التمارين العملية:\n${item.display_name}\n\nأرسل رقم الأسبوع الذي تنتمي إليه التمارين (من 1 إلى 99).\nرقم Sec في اسم الملف يُستخدم لترتيب الملفات فقط.`,
+        [[{ text: "إلغاء التصنيف", callback_data: "cancel_section_week_input" }]],
       );
       return;
     }
@@ -1219,13 +1345,14 @@ async function handleCallback(env, callback) {
       await env.DB.prepare(
         `UPDATE sessions SET awaiting_sections_week = 1, pending_section_item_id = ?, updated_at = ? WHERE id = ?`,
       ).bind(id, nowIso(), active.id).run();
-      await sendInline(env, chatId, "اكتب رقم أسبوع السكاشن من 1 إلى 99 أولًا.", []);
+      await sendInline(env, chatId, "أرسل رقم أسبوع التمارين العملية من 1 إلى 99 أولًا.", [[{ text: "إلغاء التصنيف", callback_data: "cancel_section_week_input" }]]);
       return;
     }
     await env.DB.prepare(
       `UPDATE items SET group_type = ?, subject_code = ?, classification_status = 'manual' WHERE id = ? AND session_id = ?`,
     ).bind(groupType, subjectCode, id, active.id).run();
-    await reply(env, chatId, `تم تصنيف العنصر ✅\n${item.display_name}\nالقسم: ${groupName(groupType)}\nالمادة: ${subject.name}`);
+    await reply(env, chatId, `تم تحديث التصنيف ✅\n${item.display_name}\nالقسم: ${groupName(groupType)}\nالمادة: ${subject.name}`);
+    await showHome(env, chatId);
     return;
   }
   if (data.startsWith("ii:")) {
@@ -1234,7 +1361,7 @@ async function handleCallback(env, callback) {
     if (!item) return;
     await sendInline(env, chatId,
       `هل أنت متأكد أنك تريد تجاهل العنصر التالي؟\n\n${item.display_name}\n\nلن يتم نشره، لكنه سيظل محفوظًا في سجل العملية.`,
-      [[{ text: "نعم، تجاهل", callback_data: `iy:${id}` }, { text: "رجوع", callback_data: "listi:0" }]],
+      [[{ text: "نعم، استبعاد الملف", callback_data: `iy:${id}` }, { text: "رجوع", callback_data: "listi:0" }]],
     );
     return;
   }
