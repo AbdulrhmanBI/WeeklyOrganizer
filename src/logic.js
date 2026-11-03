@@ -95,7 +95,7 @@ export function makeAvailabilityAnnouncement(items, lectureWeekNumber, sectionsW
   return `${parts.join(" و")} متوفرة بالكامل على التشانل والبوت (@credit27_bot) ✅ بالتوفيق`;
 }
 
-export const SUMMARIES_FOOTER = "☝🏻 ملخص محاضرة كل مادة الأسبوع ده";
+export const SUMMARIES_FOOTER = "☝🏻 ملخص محاضرات الأسبوع ده";
 
 export function normalizeText(value = "") {
   return String(value)
@@ -205,7 +205,7 @@ export function classifyTelegramMessage(message) {
     /#/.test(text);
   const looksLikeGeneratedGroupFooter = media.mediaKind === "text" && (
     /سكاشن\s+الأسبوع/.test(text) ||
-    /ملخص\s+محاضرة\s+كل\s+مادة/.test(text)
+    /(?:ملخص\s+محاضرة\s+كل\s+مادة|ملخص\s+محاضرات\s+الأسبوع)/.test(text)
   );
   const looksLikeDividerOnly = media.mediaKind === "text" && /^[\s━─—_-]{8,}$/.test(text);
 
