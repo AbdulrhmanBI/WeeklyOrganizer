@@ -1,4 +1,4 @@
-import {
+ import {
   SUBJECTS,
   GROUPS,
   MAIN_BUTTONS,
