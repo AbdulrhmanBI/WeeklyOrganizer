@@ -226,6 +226,7 @@ async function showHome(env, chatId) {
       rows.push([{ text: `استخدام أسبوع التمارين الحالي (${session.sections_week_number})`, callback_data: `use_sections_week:${session.pending_section_item_id}` }]);
     }
     rows.push([{ text: "إلغاء تصنيف هذا الملف", callback_data: "cancel_section_week_input" }]);
+    rows.push([{ text: "إلغاء الأسبوع بالكامل", callback_data: "cancel_session" }]);
     await sendInline(env, chatId,
       `بانتظار رقم أسبوع التمارين العملية من 1 إلى 99.${session.pending_section_item_id ? "\nأرسل الرقم في المحادثة، أو استخدم الرقم المحفوظ." : ""}`,
       rows,
@@ -257,8 +258,8 @@ async function showHome(env, chatId) {
 
   if (session.status === "publishing") {
     await sendInline(env, chatId,
-      `يجري نشر الأسبوع ${formatWeekOrdinal(session.week_number) || session.week_number} في القناة. يمكنك متابعة النشر عند الحاجة.`,
-      [[{ text: "متابعة النشر", callback_data: "continue_publish" }], [{ text: "عرض الحالة", callback_data: "show_status" }]],
+      `يجري نشر الأسبوع ${formatWeekOrdinal(session.week_number) || session.week_number} في القناة. يمكنك متابعة النشر أو إيقاف ما تبقى.`,
+      [[{ text: "متابعة النشر", callback_data: "continue_publish" }], [{ text: "عرض الحالة", callback_data: "show_status" }], [{ text: "إيقاف النشر وإلغاء الأسبوع", callback_data: "cancel_session" }]],
     );
     return;
   }
@@ -522,6 +523,9 @@ async function showPreview(env, chatId, session) {
       { text: "تصحيح ملف", callback_data: "listc:0" },
       { text: "استبعاد ملف", callback_data: "listi:0" },
     ]);
+    if (session.status === "ready") {
+      buttons.push([{ text: "🗑 إلغاء هذا الأسبوع وبدء أسبوع جديد", callback_data: "cancel_session" }]);
+    }
   }
   if (session.status === "collecting") {
     buttons.push([{ text: "إنهاء استقبال الملفات", callback_data: "finish_receiving" }]);
@@ -658,20 +662,29 @@ async function showItemPicker(env, chatId, session, mode, page) {
 
 async function cancelCurrentSession(env, chatId, session) {
   if (!session) {
-    await reply(env, chatId, "لا توجد عملية حالية لإلغائها.");
+    await showHome(env, chatId);
     return;
   }
+
   if (session.status === "publishing" || session.status === "publish_failed") {
     await sendInline(env, chatId,
-      "تنبيه: قد يكون جزء من المحتوى نُشر بالفعل. إلغاء العملية سيوقف ما تبقى فقط، ولن يحذف المنشورات التي وصلت للقناة. هل تؤكد؟",
-      [[{ text: "نعم، أوقف باقي النشر", callback_data: `cancelconfirm:${session.id}` }], [{ text: "رجوع", callback_data: "menu" }]],
+      "هل تريد إيقاف النشر وإلغاء الأسبوع الحالي؟\n\nقد تكون بعض الرسائل وصلت إلى القناة بالفعل؛ إيقاف العملية لن يحذف ما نُشر سابقًا. ستظل الملفات الأصلية محفوظة في سجل الأسبوع.",
+      [
+        [{ text: "نعم، أوقف النشر وألغِ الأسبوع", callback_data: `cancelconfirm:${session.id}` }],
+        [{ text: "العودة إلى الأسبوع", callback_data: "home" }],
+      ],
     );
     return;
   }
-  await env.DB.prepare(
-    `UPDATE sessions SET status = 'cancelled', updated_at = ? WHERE id = ?`,
-  ).bind(nowIso(), session.id).run();
-  await reply(env, chatId, `أُلغيت عملية الأسبوع ${formatWeekOrdinal(session.week_number) || session.week_number || "الجديد"}. يمكنك بدء أسبوع جديد من القائمة الرئيسية.`);
+
+  await sendInline(env, chatId,
+    `هل تريد إلغاء الأسبوع ${formatWeekOrdinal(session.week_number) || session.week_number || "الجديد"}؟\n\nلن تُحذف الملفات من سجل البوت، لكن لن تتم متابعة هذا الأسبوع. بعد الإلغاء يمكنك بدء أسبوع جديد.`,
+    [
+      [{ text: "نعم، إلغاء الأسبوع", callback_data: "confirm_cancel_session" }],
+      [{ text: "إلغاء الأسبوع وبدء أسبوع جديد", callback_data: "cancel_and_start_week" }],
+      [{ text: "العودة إلى الأسبوع", callback_data: "home" }],
+    ],
+  );
 }
 
 function getPublishDestination(env, session) {
@@ -1149,7 +1162,12 @@ async function resumeFailedPublish(env, chatId, session) {
   const uncertain = problem.status === "sending";
   await sendInline(env, chatId,
     `${uncertain ? "وجدت عنصرًا توقفت العملية أثناء إرساله. راجع القناة أولًا؛ قد يكون تم نشره." : "وجدت عنصرًا فشل نشره."}\n\nاختر إعادة المحاولة أو تخطي العنصر.`,
-    [[{ text: "🔁 إعادة المحاولة", callback_data: `retry:${problem.id}` }], [{ text: "⏭ تخطي هذا العنصر", callback_data: `skip:${problem.id}` }]],
+    [
+      [{ text: "🔁 إعادة المحاولة", callback_data: `retry:${problem.id}` }],
+      [{ text: "⏭ تخطي هذا العنصر", callback_data: `skip:${problem.id}` }],
+      [{ text: "إيقاف النشر وإلغاء الأسبوع", callback_data: "cancel_session" }],
+      [{ text: "🏠 الرئيسية", callback_data: "home" }],
+    ],
   );
 }
 
@@ -1243,6 +1261,27 @@ async function handleCallback(env, callback) {
   }
   if (data === "cancel_session") {
     await cancelCurrentSession(env, chatId, active);
+    return;
+  }
+  if (data === "confirm_cancel_session" || data === "cancel_and_start_week") {
+    if (!active) {
+      await showHome(env, chatId);
+      return;
+    }
+    if (["publishing", "publish_failed"].includes(active.status)) {
+      await reply(env, chatId, "استخدم تأكيد إيقاف النشر الظاهر في رسالة إيقاف النشر.");
+      return;
+    }
+    await env.DB.prepare(
+      `UPDATE sessions SET status = 'cancelled', updated_at = ? WHERE id = ?`,
+    ).bind(nowIso(), active.id).run();
+    if (data === "cancel_and_start_week") {
+      await reply(env, chatId, "أُلغي الأسبوع السابق، وسنبدأ أسبوعًا جديدًا الآن.");
+      await createWeekSession(env, chatId);
+    } else {
+      await reply(env, chatId, "أُلغي الأسبوع الحالي بنجاح. يمكنك بدء أسبوع جديد من القائمة الرئيسية.");
+      await showHome(env, chatId);
+    }
     return;
   }
   if (data === "cancel_section_week_input") {
@@ -1378,7 +1417,8 @@ async function handleCallback(env, callback) {
     const id = Number(data.split(":")[1]);
     if (!active || active.id !== id) return;
     await env.DB.prepare(`UPDATE sessions SET status = 'cancelled', updated_at = ? WHERE id = ?`).bind(nowIso(), id).run();
-    await reply(env, chatId, "تم إيقاف النشر. الرسائل التي نُشرت بالفعل ستظل موجودة في القناة، ولم يتم حذفها.");
+    await reply(env, chatId, "تم إيقاف النشر وإلغاء الأسبوع. الرسائل التي نُشرت بالفعل ستظل موجودة في القناة، ولم يتم حذفها.");
+    await showHome(env, chatId);
     return;
   }
   if (data.startsWith("retry:")) {
